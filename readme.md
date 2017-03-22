@@ -24,6 +24,8 @@ Most prompts are cluttered, ugly and slow. I wanted something visually pleasing 
 
 Can be installed with `npm` or manually.
 
+> **Please note** that plain ZSH and some frameworks (such as Zim) do not include the lib for Git prompt details. As such, you may be required to install this lib separately in those cases. *More information on manually installing the Git lib will be included when it becomes available.* [[2]](https://github.com/therealklanni/purity/issues/2)
+
 ### npm
 
 ```sh
