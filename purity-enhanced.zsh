@@ -16,6 +16,8 @@
 # %m => shortname host
 # %(?..) => prompt conditional - %(condition.true.false)
 
+# Ensure prompt substitution is enabled (required for functions in prompt)
+setopt promptsubst
 
 # turns seconds into human readable time
 # 165392 => 1d 21h 56m 32s
@@ -59,7 +61,7 @@ prompt_purity_enhanced_precmd() {
 	print -Pn '\e]0;%~\a'
 
 	local prompt_purity_enhanced_preprompt="%~$(git_prompt_info) $(git_prompt_status)"
-	print -P ' %F{yellow}`prompt_purity_enhanced_cmd_exec_time`%f'
+	print -P " %F{yellow}$(prompt_purity_enhanced_cmd_exec_time)%f"
 
 	# check async if there is anything to pull
 	(( ${PURITY_GIT_PULL:-1} )) && {
@@ -78,17 +80,70 @@ prompt_purity_enhanced_precmd() {
 	unset cmd_timestamp
 }
 
+# Fallback git functions if oh-my-zsh is not loaded
+if ! command -v git_prompt_info >/dev/null 2>&1; then
+	git_prompt_info() {
+		local ref
+		ref=$(command git symbolic-ref HEAD 2> /dev/null) || \
+		ref=$(command git rev-parse --short HEAD 2> /dev/null) || return 0
+		echo "$ZSH_THEME_GIT_PROMPT_PREFIX${ref#refs/heads/}$ZSH_THEME_GIT_PROMPT_SUFFIX"
+	}
+fi
+
+if ! command -v git_prompt_status >/dev/null 2>&1; then
+	git_prompt_status() {
+		local INDEX STATUS
+		INDEX=$(command git status --porcelain -b 2> /dev/null)
+		STATUS=""
+		if $(echo "$INDEX" | command grep -E '^\?\? ' &> /dev/null); then
+			STATUS="$ZSH_THEME_GIT_PROMPT_UNTRACKED$STATUS"
+		fi
+		if $(echo "$INDEX" | grep '^A  ' &> /dev/null); then
+			STATUS="$ZSH_THEME_GIT_PROMPT_ADDED$STATUS"
+		elif $(echo "$INDEX" | grep '^M  ' &> /dev/null); then
+			STATUS="$ZSH_THEME_GIT_PROMPT_ADDED$STATUS"
+		elif $(echo "$INDEX" | grep '^MM ' &> /dev/null); then
+			STATUS="$ZSH_THEME_GIT_PROMPT_ADDED$STATUS"
+		fi
+		if $(echo "$INDEX" | grep '^ M ' &> /dev/null); then
+			STATUS="$ZSH_THEME_GIT_PROMPT_MODIFIED$STATUS"
+		elif $(echo "$INDEX" | grep '^AM ' &> /dev/null); then
+			STATUS="$ZSH_THEME_GIT_PROMPT_MODIFIED$STATUS"
+		elif $(echo "$INDEX" | grep '^MM ' &> /dev/null); then
+			STATUS="$ZSH_THEME_GIT_PROMPT_MODIFIED$STATUS"
+		elif $(echo "$INDEX" | grep '^ T ' &> /dev/null); then
+			STATUS="$ZSH_THEME_GIT_PROMPT_MODIFIED$STATUS"
+		fi
+		if $(echo "$INDEX" | grep '^R  ' &> /dev/null); then
+			STATUS="$ZSH_THEME_GIT_PROMPT_RENAMED$STATUS"
+		fi
+		if $(echo "$INDEX" | grep '^ D ' &> /dev/null); then
+			STATUS="$ZSH_THEME_GIT_PROMPT_DELETED$STATUS"
+		elif $(echo "$INDEX" | grep '^D  ' &> /dev/null); then
+			STATUS="$ZSH_THEME_GIT_PROMPT_DELETED$STATUS"
+		elif $(echo "$INDEX" | grep '^AD ' &> /dev/null); then
+			STATUS="$ZSH_THEME_GIT_PROMPT_DELETED$STATUS"
+		fi
+		if $(command git rev-parse --verify refs/stash >/dev/null 2>&1); then
+			STATUS="$ZSH_THEME_GIT_PROMPT_STASHED$STATUS"
+		fi
+		if $(echo "$INDEX" | grep '^UU ' &> /dev/null); then
+			STATUS="$ZSH_THEME_GIT_PROMPT_UNMERGED$STATUS"
+		fi
+		echo $STATUS
+	}
+fi
 
 prompt_purity_enhanced_setup() {
 	# prevent percentage showing up
 	# if output doesn't end with a newline
 	export PROMPT_EOL_MARK=''
 
+	# Set prompt options (these only work with promptinit, so we set them directly above)
 	prompt_opts=(cr subst percent)
 
 	zmodload zsh/datetime
 	autoload -Uz add-zsh-hook
-	autoload -Uz vcs_info
 
 	add-zsh-hook precmd prompt_purity_enhanced_precmd
 	add-zsh-hook preexec prompt_purity_enhanced_preexec
@@ -96,8 +151,9 @@ prompt_purity_enhanced_setup() {
 	# show username@host if logged in through SSH
 	[[ "$SSH_CONNECTION" != '' ]] && prompt_purity_enhanced_username='%n@%m '
 
+	# Git prompt configuration
 	ZSH_THEME_GIT_PROMPT_PREFIX=" %F{cyan}git:%f%F{yellow}"
-	ZSH_THEME_GIT_PROMPT_SUFFIX="%b"
+	ZSH_THEME_GIT_PROMPT_SUFFIX="%f"
 	ZSH_THEME_GIT_PROMPT_DIRTY=""
 	ZSH_THEME_GIT_PROMPT_CLEAN=""
 
@@ -107,6 +163,7 @@ prompt_purity_enhanced_setup() {
 	ZSH_THEME_GIT_PROMPT_RENAMED="%F{magenta}➜%f "
 	ZSH_THEME_GIT_PROMPT_UNMERGED="%F{yellow}═%f "
 	ZSH_THEME_GIT_PROMPT_UNTRACKED="%F{cyan}✩%f "
+	ZSH_THEME_GIT_PROMPT_STASHED="%F{magenta}⚑%f "
 
 	# prompt turns red if the previous command didn't exit with 0
 	PROMPT='%F{blue}%~$(git_prompt_info) $(git_prompt_status) %(?.%F{green}.%F{red})❯%f '

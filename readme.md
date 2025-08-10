@@ -1,124 +1,180 @@
-# Purity
+# Purity Enhanced
 
-> Pretty, minimal and fast ZSH prompt
+> A beautiful, minimal and fast ZSH prompt with enhanced git status indicators
 
-![screenshot](https://raw.githubusercontent.com/therealklanni/purity/master/screenshot.png)
-> Git status indicators will appear before the prompt terminator, view the source for details
+![screenshot](screenshot.png)
 
 ## Overview
 
-Most prompts are cluttered, ugly and slow. I wanted something visually pleasing that stayed out of my way.
+Purity Enhanced is a fork of the original [Purity](https://github.com/therealklanni/purity) theme with improved compatibility and enhanced git status indicators. This theme works seamlessly with modern ZSH plugin managers like [antidote](https://github.com/mattmc3/antidote), [antigen](https://github.com/zsh-users/antigen), and oh-my-zsh.
 
-### Why?
+### Features
 
-- Comes with the perfect prompt character. Author went through the whole Unicode range to find it.
-- Shows `git` status info.
-- Prompt character turns red if the last command didn't exit with `0`.
-- Command execution time will be displayed if it exceeds the set threshold.
-- Username and host only displayed when in an SSH session.
-- Shows the current path in the title and the current directory and command when a process is running.
-- Makes an excellent starting point for your own custom prompt.
+- ✨ **Beautiful and minimal** - Clean design that stays out of your way
+- 🎯 **Git status indicators** - Shows detailed git status with intuitive symbols
+- ⚡ **Fast** - Optimized for speed with asynchronous git pull checking
+- ⏱️ **Execution time** - Shows command execution time when it exceeds threshold
+- 🔴 **Smart prompt** - Prompt character turns red on command failure
+- 🖥️ **SSH awareness** - Shows username@host only in SSH sessions
+- 📁 **Informative title** - Shows current path in terminal title
+- 🔧 **Plugin manager compatible** - Works with antidote, antigen, oh-my-zsh, and more
 
+### Git Status Indicators
 
-## Install
+The theme displays git information with the following indicators:
 
-Can be installed with `npm` or manually.
+- `git:branch-name` - Current git branch
+- `✓` Green - Staged changes
+- `✶` Blue - Modified files
+- `✗` Red - Deleted files
+- `➜` Magenta - Renamed files
+- `═` Yellow - Unmerged files
+- `✩` Cyan - Untracked files
+- `⚑` Magenta - Stashed changes
+- `⇣` Cyan - Updates available from remote
 
-> **Please note** that plain ZSH and some frameworks (such as Zim) do not include the lib for Git prompt details. As such, you may be required to install this lib separately in those cases. *More information on manually installing the Git lib will be included when it becomes available.* [[2]](https://github.com/therealklanni/purity/issues/2)
+## Installation
 
-### npm
+### [antidote](https://github.com/mattmc3/antidote)
 
-```sh
-$ npm install --global purity-prompt
+Add to your `.zsh_plugins.txt`:
+```
+speto/purity-enhanced
 ```
 
-That's it. Skip to [Getting started](#getting-started).
-
-### Manually
-
-1. Either…
-  - Clone this repo
-  - add it as a submodule, or
-  - just download `purity.zsh`
-
-2. Symlink `purity.zsh` to somewhere in [`$fpath`](http://www.refining-linux.org/archives/46/ZSH-Gem-12-Autoloading-functions/) with the name `prompt_purity_setup`.
-
-#### Example
-
-```sh
-$ ln -s "$PWD/purity.zsh" /usr/local/share/zsh/site-functions/prompt_purity_setup
-```
-*Run `echo $fpath` to see possible locations.*
-
-For a user-specific installation (which would not require escalated privileges), simply add a directory to `$fpath` for that user:
-
-```sh
-# .zshenv or .zshrc
-fpath=( "$HOME/.zfunctions" $fpath )
-```
-
-Then install the theme there:
-
-```sh
-$ ln -s "$PWD/purity.zsh" "$HOME/.zfunctions/prompt_purity_setup"
-```
-
-
-## Getting started
-
-Initialize the prompt system (if not so already) and choose `purity`:
-
-```sh
-# .zshrc
-autoload -U promptinit && promptinit
-prompt purity
-```
-
-
-## Options
-
-### `PURITY_CMD_MAX_EXEC_TIME`
-
-The max execution time of a process before its run time is shown when it exits. Defaults to `5` seconds.
-
-### `PURITY_GIT_PULL`
-
-Set `PURITY_GIT_PULL=0` to prevent Purity from checking whether the current Git remote has been updated.
-
-## Example
-
-```sh
-# .zshrc
-
-autoload -U promptinit && promptinit
-
-# optionally define some options
-PURITY_CMD_MAX_EXEC_TIME=10
-
-prompt purity
-```
-
-
-## Tips
-
-[Solarized](http://ethanschoonover.com/solarized) theme with the [Source Code Pro](https://github.com/adobe/source-code-pro) font (12pt) is a beautiful combination, as seen in the screenshot above. Just make sure you have anti-aliasing enabled in your Terminal.
-
-
-## Integration
-
-### [oh-my-zsh](https://github.com/robbyrussell/oh-my-zsh)
-
-Symlink (or copy) `purity.zsh` to `~/.oh-my-zsh/custom/purity.zsh-theme` and add `ZSH_THEME="purity"` to your `.zshrc` file.
-
-### [prezto](https://github.com/sorin-ionescu/prezto)
-
-Symlink (or copy) `purity.zsh` to `~/.zprezto/modules/prompt/functions/prompt_purity_setup` alongside Prezto's other prompts. Then `set zstyle ':prezto:module:prompt' theme 'purity'` in `~/.zpreztorc`.
+Then reload with `antidote load`.
 
 ### [antigen](https://github.com/zsh-users/antigen)
 
-Add `antigen bundle therealklanni/purity` to your .zshrc file (do not use the `antigen theme` function).
+Add to your `.zshrc`:
+```sh
+antigen bundle speto/purity-enhanced
+antigen apply
+```
+
+### [oh-my-zsh](https://github.com/ohmyzsh/ohmyzsh)
+
+Clone the repository:
+```sh
+git clone https://github.com/speto/purity-enhanced.git ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/themes/purity-enhanced
+```
+
+Then symlink the theme file:
+```sh
+ln -s ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/themes/purity-enhanced/purity-enhanced.zsh ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/themes/purity-enhanced.zsh-theme
+```
+
+Set `ZSH_THEME="purity-enhanced"` in your `.zshrc`.
+
+### [prezto](https://github.com/sorin-ionescu/prezto)
+
+Symlink the theme to Prezto's prompt directory:
+```sh
+ln -s /path/to/purity-enhanced/purity-enhanced.zsh ~/.zprezto/modules/prompt/functions/prompt_purity_enhanced_setup
+```
+
+Then set in `~/.zpreztorc`:
+```sh
+zstyle ':prezto:module:prompt' theme 'purity_enhanced'
+```
+
+### Manual Installation
+
+1. Clone this repository:
+   ```sh
+   git clone https://github.com/speto/purity-enhanced.git
+   ```
+
+2. Source the theme in your `.zshrc`:
+   ```sh
+   source /path/to/purity-enhanced/purity-enhanced.zsh
+   ```
+
+## Configuration
+
+### Options
+
+#### `PURITY_CMD_MAX_EXEC_TIME`
+
+The maximum execution time of a process before its run time is shown when it exits. Defaults to `5` seconds.
+
+```sh
+PURITY_CMD_MAX_EXEC_TIME=10  # Show execution time for commands longer than 10 seconds
+```
+
+#### `PURITY_GIT_PULL`
+
+Set `PURITY_GIT_PULL=0` to prevent Purity Enhanced from checking whether the current Git remote has been updated.
+
+```sh
+PURITY_GIT_PULL=0  # Disable automatic git fetch
+```
+
+### Example Configuration
+
+```sh
+# ~/.zshrc
+
+# Set options before loading the theme
+PURITY_CMD_MAX_EXEC_TIME=3  # Show execution time for commands longer than 3 seconds
+PURITY_GIT_PULL=1           # Enable git pull indicator (default)
+
+# Load with your plugin manager (example with antidote)
+source $(brew --prefix)/opt/antidote/share/antidote/antidote.zsh
+antidote load
+```
+
+## Requirements
+
+- ZSH 5.0 or newer
+- Git 2.0 or newer (for git status features)
+- A terminal with Unicode support
+
+## Differences from Original Purity
+
+This enhanced version includes:
+
+1. **Better plugin manager compatibility** - Works out of the box with antidote and other modern plugin managers without requiring manual prompt initialization
+2. **Self-contained** - Includes fallback git functions when oh-my-zsh is not available
+3. **Enhanced git indicators** - More detailed git status with additional indicators like stash status
+4. **Prompt improvements** - Uses `~` for home directory in the prompt for cleaner, more compact display
+5. **Bug fixes** - Fixed prompt substitution issues and improved compatibility across different ZSH configurations
+6. **No npm dependency** - Simplified installation via git-based plugin managers only
+
+## Recommended Setup
+
+For the best visual experience, I recommend:
+
+- **Terminal**: macOS Terminal, [Ghostty](https://ghostty.org/), or your preferred terminal emulator
+- **Font**: [JetBrains Mono](https://www.jetbrains.com/lp/mono/) or [Source Code Pro](https://github.com/adobe/source-code-pro) at 12-14pt
+- **Color Scheme**: [Solarized Dark](https://ethanschoonover.com/solarized/) or [Dracula](https://draculatheme.com/)
+
+## Troubleshooting
+
+### Prompt shows literal function names
+
+If you see `$(git_prompt_info)` instead of git information, make sure you're using a recent version. The theme now automatically enables prompt substitution.
+
+### Git indicators not showing
+
+The theme includes its own git functions, but for best performance with oh-my-zsh, make sure the git plugin is loaded before this theme.
+
+### Execution time always showing
+
+Adjust `PURITY_CMD_MAX_EXEC_TIME` to a higher value, or set it to a very high number to effectively disable it:
+```sh
+PURITY_CMD_MAX_EXEC_TIME=99999
+```
+
 
 
 ## License
 
-[MIT](http://opensource.org/licenses/MIT) © [Kevin Lanni](https://github.com/therealklanni)
+MIT © [Stefan Petovsky](https://github.com/speto)
+
+Original Purity theme by [Kevin Lanni](https://github.com/therealklanni)
+
+## Acknowledgments
+
+- [Kevin Lanni](https://github.com/therealklanni) for the original [Purity](https://github.com/therealklanni/purity) theme
+- [Sindre Sorhus](https://github.com/sindresorhus) for the original [Pure](https://github.com/sindresorhus/pure) prompt that inspired Purity
