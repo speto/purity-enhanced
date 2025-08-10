@@ -12,7 +12,8 @@ Purity Enhanced is a fork of the original [Purity](https://github.com/therealkla
 
 - ✨ **Beautiful and minimal** - Clean design that stays out of your way
 - 🎯 **Git status indicators** - Shows detailed git status with intuitive symbols
-- ⚡ **Fast** - Optimized for speed with asynchronous git pull checking
+- ⚡ **Fast** - Fully asynchronous git operations powered by zsh-async
+- 🚀 **Non-blocking** - Git operations never freeze your shell, even in large repositories
 - ⏱️ **Execution time** - Shows command execution time when it exceeds threshold
 - 🔴 **Smart prompt** - Prompt character turns red on command failure
 - 🖥️ **SSH & Container awareness** - Shows username@host in SSH sessions, Docker containers, and Kubernetes pods
@@ -51,6 +52,7 @@ The theme displays git information with the following indicators:
 
 Add to your `.zsh_plugins.txt`:
 ```
+mafredri/zsh-async  # Required for async git operations
 speto/purity-enhanced
 ```
 
@@ -60,6 +62,7 @@ Then reload with `antidote load`.
 
 Add to your `.zshrc`:
 ```sh
+antigen bundle mafredri/zsh-async  # Required for async git operations
 antigen bundle speto/purity-enhanced
 antigen apply
 ```
@@ -197,6 +200,23 @@ antidote load
 - ZSH 5.0 or newer
 - Git 2.0 or newer (for git status features)
 - A terminal with Unicode support
+- [mafredri/zsh-async](https://github.com/mafredri/zsh-async) (for async git operations)
+
+## Development
+
+### Running Tests
+
+The theme includes a test suite to ensure everything works correctly:
+
+```sh
+# Run all tests
+make test
+
+# Or directly
+tests/run.sh
+```
+
+Tests are automatically run on GitHub Actions for every push and pull request.
 
 ## Differences from Original Purity
 

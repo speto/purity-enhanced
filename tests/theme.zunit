@@ -1,0 +1,107 @@
+#!/usr/bin/env zunit
+
+@setup {
+    # Load dependencies
+    load ../purity-enhanced.zsh
+}
+
+@test 'Theme loads without errors' {
+    run prompt_purity_enhanced_setup
+    assert $state equals 0
+}
+
+@test 'Human time function formats correctly' {
+    run prompt_purity_enhanced_human_time 165392
+    assert "$output" same_as "⌚︎ 1d 21h 56m 32s"
+}
+
+@test 'Human time shows only seconds for short durations' {
+    run prompt_purity_enhanced_human_time 5
+    assert "$output" same_as "⌚︎ 5s"
+}
+
+@test 'Human time shows minutes and seconds' {
+    run prompt_purity_enhanced_human_time 125
+    assert "$output" same_as "⌚︎ 2m 5s"
+}
+
+@test 'Git action detects rebase' {
+    # Mock git directory structure
+    local temp_git=$(mktemp -d)
+    mkdir -p "$temp_git/rebase-merge"
+    
+    # Override git command to return our temp directory
+    git() {
+        if [[ "$1" == "rev-parse" && "$2" == "--git-dir" ]]; then
+            echo "$temp_git"
+            return 0
+        fi
+        command git "$@"
+    }
+    
+    run prompt_purity_enhanced_git_action
+    assert "$output" contains "rebase-m"
+    
+    rm -rf "$temp_git"
+}
+
+@test 'Git action detects merge' {
+    local temp_git=$(mktemp -d)
+    touch "$temp_git/MERGE_HEAD"
+    
+    git() {
+        if [[ "$1" == "rev-parse" && "$2" == "--git-dir" ]]; then
+            echo "$temp_git"
+            return 0
+        fi
+        command git "$@"
+    }
+    
+    run prompt_purity_enhanced_git_action
+    assert "$output" contains "merge"
+    
+    rm -rf "$temp_git"
+}
+
+@test 'Execution time shows when threshold exceeded' {
+    cmd_timestamp=$((EPOCHSECONDS - 10))
+    PURITY_CMD_MAX_EXEC_TIME=5
+    
+    run prompt_purity_enhanced_cmd_exec_time
+    assert "$output" contains "10s"
+}
+
+@test 'Execution time hidden when below threshold' {
+    cmd_timestamp=$((EPOCHSECONDS - 3))
+    PURITY_CMD_MAX_EXEC_TIME=5
+    
+    run prompt_purity_enhanced_cmd_exec_time
+    assert "$output" is_empty
+}
+
+@test 'Color getter returns default when not set' {
+    run prompt_purity_enhanced_get_color "test_color" "blue"
+    assert "$output" equals "blue"
+}
+
+@test 'Color getter returns custom value when set' {
+    zstyle ':prompt:purity-enhanced:test_color' color "red"
+    run prompt_purity_enhanced_get_color "test_color" "blue"
+    assert "$output" equals "red"
+}
+
+@test 'Async functions available when zsh-async loaded' {
+    # Mock async_init function
+    async_init() { return 0 }
+    
+    run prompt_purity_enhanced_async_available
+    assert $state equals 0
+}
+
+@test 'Async functions unavailable when zsh-async not loaded' {
+    # Ensure async_init doesn't exist
+    unfunction async_init 2>/dev/null || true
+    
+    run prompt_purity_enhanced_async_available
+    assert $state equals 1
+}
