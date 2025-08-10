@@ -19,6 +19,10 @@
 # Ensure prompt substitution is enabled (required for functions in prompt)
 setopt promptsubst
 
+# Performance options
+PURE_GIT_UNTRACKED_DIRTY=${PURE_GIT_UNTRACKED_DIRTY:-1}
+PURE_GIT_DELAY_DIRTY_CHECK=${PURE_GIT_DELAY_DIRTY_CHECK:-1800}
+
 # turns seconds into human readable time
 # 165392 => 1d 21h 56m 32s
 prompt_purity_enhanced_human_time() {
@@ -61,7 +65,15 @@ prompt_purity_enhanced_precmd() {
 	print -Pn '\e]0;%~\a'
 
 	local prompt_purity_enhanced_preprompt="%~$(git_prompt_info) $(git_prompt_status)"
-	print -P " %F{yellow}$(prompt_purity_enhanced_cmd_exec_time)%f"
+	local exec_time_color=$(prompt_purity_enhanced_get_color execution_time yellow)
+	print -P " %F{$exec_time_color}$(prompt_purity_enhanced_cmd_exec_time)%f"
+
+	# Show virtualenv if activated
+	if [[ -n $VIRTUAL_ENV ]]; then
+		local venv_color=$(prompt_purity_enhanced_get_color virtualenv 242)
+		local virtualenv_prompt=" %F{$venv_color}(${VIRTUAL_ENV:t})%f"
+		print -P "$virtualenv_prompt"
+	fi
 
 	# check async if there is anything to pull
 	(( ${PURITY_GIT_PULL:-1} )) && {
@@ -80,22 +92,64 @@ prompt_purity_enhanced_precmd() {
 	unset cmd_timestamp
 }
 
+# Function to get current git action (rebase, merge, etc.)
+prompt_purity_enhanced_git_action() {
+	local git_dir="$(command git rev-parse --git-dir 2>/dev/null)"
+	[[ -z "$git_dir" ]] && return
+
+	local action=""
+	if [[ -f "$git_dir/rebase-merge/interactive" ]]; then
+		action="rebase-i"
+	elif [[ -d "$git_dir/rebase-merge" ]]; then
+		action="rebase-m"
+	elif [[ -d "$git_dir/rebase-apply" ]]; then
+		if [[ -f "$git_dir/rebase-apply/rebasing" ]]; then
+			action="rebase"
+		elif [[ -f "$git_dir/rebase-apply/applying" ]]; then
+			action="am"
+		else
+			action="am/rebase"
+		fi
+	elif [[ -f "$git_dir/MERGE_HEAD" ]]; then
+		action="merge"
+	elif [[ -f "$git_dir/CHERRY_PICK_HEAD" ]]; then
+		action="cherry-pick"
+	elif [[ -f "$git_dir/REVERT_HEAD" ]]; then
+		action="revert"
+	elif [[ -f "$git_dir/BISECT_LOG" ]]; then
+		action="bisect"
+	fi
+
+	if [[ -n "$action" ]]; then
+		local action_color=$(prompt_purity_enhanced_get_color git:action yellow)
+		echo " %F{$action_color}$action%f"
+	fi
+}
+
 # Fallback git functions if oh-my-zsh is not loaded
 if ! command -v git_prompt_info >/dev/null 2>&1; then
 	git_prompt_info() {
 		local ref
 		ref=$(command git symbolic-ref HEAD 2> /dev/null) || \
 		ref=$(command git rev-parse --short HEAD 2> /dev/null) || return 0
-		echo "$ZSH_THEME_GIT_PROMPT_PREFIX${ref#refs/heads/}$ZSH_THEME_GIT_PROMPT_SUFFIX"
+		local branch="${ref#refs/heads/}"
+		local action="$(prompt_purity_enhanced_git_action)"
+		echo "$ZSH_THEME_GIT_PROMPT_PREFIX${branch}$ZSH_THEME_GIT_PROMPT_SUFFIX${action}"
 	}
 fi
 
 if ! command -v git_prompt_status >/dev/null 2>&1; then
 	git_prompt_status() {
 		local INDEX STATUS
-		INDEX=$(command git status --porcelain -b 2> /dev/null)
+		# Check if we should include untracked files
+		if (( PURE_GIT_UNTRACKED_DIRTY )); then
+			INDEX=$(command git status --porcelain -b 2> /dev/null)
+		else
+			INDEX=$(command git status --porcelain -b --untracked-files=no 2> /dev/null)
+		fi
 		STATUS=""
-		if $(echo "$INDEX" | command grep -E '^\?\? ' &> /dev/null); then
+		# Only check for untracked if enabled
+		if (( PURE_GIT_UNTRACKED_DIRTY )) && $(echo "$INDEX" | command grep -E '^\?\? ' &> /dev/null); then
 			STATUS="$ZSH_THEME_GIT_PROMPT_UNTRACKED$STATUS"
 		fi
 		if $(echo "$INDEX" | grep '^A  ' &> /dev/null); then
@@ -134,6 +188,15 @@ if ! command -v git_prompt_status >/dev/null 2>&1; then
 	}
 fi
 
+# Get a color value from zstyle with fallback
+prompt_purity_enhanced_get_color() {
+	local color_name=$1
+	local default_color=$2
+	local color
+	zstyle -s :prompt:purity-enhanced:$color_name color color || color=$default_color
+	echo $color
+}
+
 prompt_purity_enhanced_setup() {
 	# prevent percentage showing up
 	# if output doesn't end with a newline
@@ -143,16 +206,30 @@ prompt_purity_enhanced_setup() {
 	prompt_opts=(cr subst percent)
 
 	zmodload zsh/datetime
+	zmodload zsh/zutil  # For zstyle
 	autoload -Uz add-zsh-hook
 
 	add-zsh-hook precmd prompt_purity_enhanced_precmd
 	add-zsh-hook preexec prompt_purity_enhanced_preexec
 
-	# show username@host if logged in through SSH
-	[[ "$SSH_CONNECTION" != '' ]] && prompt_purity_enhanced_username='%n@%m '
+	# Set up default colors (can be overridden via zstyle)
+	local path_color=$(prompt_purity_enhanced_get_color path blue)
+	local git_branch_color=$(prompt_purity_enhanced_get_color git:branch yellow)
+	local git_action_color=$(prompt_purity_enhanced_get_color git:action yellow)
+	local prompt_success_color=$(prompt_purity_enhanced_get_color prompt:success green)
+	local prompt_error_color=$(prompt_purity_enhanced_get_color prompt:error red)
+	local execution_time_color=$(prompt_purity_enhanced_get_color execution_time yellow)
+	local virtualenv_color=$(prompt_purity_enhanced_get_color virtualenv 242)
+	local suspended_jobs_color=$(prompt_purity_enhanced_get_color suspended_jobs red)
+	local user_host_color=$(prompt_purity_enhanced_get_color host 242)
+
+	# show username@host if logged in through SSH or in a container
+	if [[ -n "$SSH_CONNECTION" ]] || [[ -f /.dockerenv ]] || [[ -n "$KUBERNETES_SERVICE_HOST" ]]; then
+		prompt_purity_enhanced_username="%F{$user_host_color}%n@%m%f "
+	fi
 
 	# Git prompt configuration
-	ZSH_THEME_GIT_PROMPT_PREFIX=" %F{cyan}git:%f%F{yellow}"
+	ZSH_THEME_GIT_PROMPT_PREFIX=" %F{cyan}git:%f%F{$git_branch_color}"
 	ZSH_THEME_GIT_PROMPT_SUFFIX="%f"
 	ZSH_THEME_GIT_PROMPT_DIRTY=""
 	ZSH_THEME_GIT_PROMPT_CLEAN=""
@@ -165,8 +242,11 @@ prompt_purity_enhanced_setup() {
 	ZSH_THEME_GIT_PROMPT_UNTRACKED="%F{cyan}✩%f "
 	ZSH_THEME_GIT_PROMPT_STASHED="%F{magenta}⚑%f "
 
+	# Build the prompt with suspended jobs indicator
+	local jobs_indicator="%(1j.%F{$suspended_jobs_color}✦%f .)"  # Show ✦ when there are background jobs
+	
 	# prompt turns red if the previous command didn't exit with 0
-	PROMPT='%F{blue}%~$(git_prompt_info) $(git_prompt_status) %(?.%F{green}.%F{red})❯%f '
+	PROMPT="${prompt_purity_enhanced_username}%F{$path_color}%~$(git_prompt_info) $(git_prompt_status) ${jobs_indicator}%(?.%F{$prompt_success_color}.%F{$prompt_error_color})❯%f "
 	RPROMPT='%F{red}%(?..⏎)%f'
 }
 
