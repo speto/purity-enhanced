@@ -1,8 +1,46 @@
 #!/usr/bin/env zunit
 
 @setup {
-    # Load dependencies
-    load ../purity-enhanced.zsh
+    # Set up test environment with robust path resolution
+    local test_root
+    if [[ -n "${ZUNIT_TEST_ROOT:-}" ]]; then
+        test_root="$ZUNIT_TEST_ROOT"
+    elif [[ -d "/workspace" ]]; then
+        # Docker container environment
+        test_root="/workspace"
+    elif [[ -f "${0:A:h}/../purity-enhanced.zsh" ]]; then
+        test_root="$(cd "${0:A:h}/.." && pwd)"
+    else
+        test_root="$(pwd)"
+    fi
+    
+    # Export required variables
+    export ZUNIT_TEST_ROOT="$test_root"
+    export THEME_FILE="$test_root/purity-enhanced.zsh"
+    export PURITY_TEST_DIR="$test_root/tests"
+    
+    # Change to repo root for consistent execution
+    cd "$test_root" || return 1
+    
+    # Load theme
+    if [[ -f "$THEME_FILE" ]]; then
+        setopt extended_glob null_glob prompt_subst
+        source "$THEME_FILE"
+    else
+        echo "Error: Theme not found at $THEME_FILE" >&2
+        return 1
+    fi
+    
+    # Load test helpers
+    if [[ -f "$PURITY_TEST_DIR/helpers/load-helpers.zsh" ]]; then
+        source "$PURITY_TEST_DIR/helpers/load-helpers.zsh"
+    else
+        echo "Error: Test helpers not found" >&2
+        return 1
+    fi
+    
+    # Setup mocks as needed
+    mock_async_setup
 }
 
 @test 'Theme loads without errors' {
@@ -91,17 +129,24 @@
 }
 
 @test 'Async functions available when zsh-async loaded' {
-    # Mock async_init function
+    # Mock async functions
     async_init() { return 0 }
+    async_start_worker() { return 0 }
     
     run prompt_purity_enhanced_async_available
     assert $state equals 0
 }
 
 @test 'Async functions unavailable when zsh-async not loaded' {
-    # Ensure async_init doesn't exist
+    # Ensure async functions don't exist
     unfunction async_init 2>/dev/null || true
+    unfunction async_start_worker 2>/dev/null || true
     
     run prompt_purity_enhanced_async_available
     assert $state equals 1
+}
+
+@teardown {
+    # Clean up mocks and state
+    mock_async_cleanup
 }

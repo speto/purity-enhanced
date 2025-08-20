@@ -1,0 +1,208 @@
+#!/usr/bin/env zunit
+
+@setup {
+    # Set up test environment with robust path resolution
+    local test_root
+    if [[ -n "${ZUNIT_TEST_ROOT:-}" ]]; then
+        test_root="$ZUNIT_TEST_ROOT"
+    elif [[ -d "/workspace" ]]; then
+        # Docker container environment
+        test_root="/workspace"
+    elif [[ -f "${0:A:h}/../../purity-enhanced.zsh" ]]; then
+        test_root="$(cd "${0:A:h}/../.." && pwd)"
+    else
+        test_root="$(pwd)"
+    fi
+    
+    # Export required variables
+    export ZUNIT_TEST_ROOT="$test_root"
+    export THEME_FILE="$test_root/purity-enhanced.zsh"
+    export PURITY_TEST_DIR="$test_root/tests"
+    
+    # Change to repo root for consistent execution
+    cd "$test_root" || return 1
+    
+    # Load theme
+    if [[ -f "$THEME_FILE" ]]; then
+        setopt extended_glob null_glob prompt_subst
+        source "$THEME_FILE"
+    else
+        echo "Error: Theme not found at $THEME_FILE" >&2
+        return 1
+    fi
+    
+    # Load test helpers
+    if [[ -f "$PURITY_TEST_DIR/helpers/load-helpers.zsh" ]]; then
+        source "$PURITY_TEST_DIR/helpers/load-helpers.zsh"
+    else
+        echo "Error: Test helpers not found" >&2
+        return 1
+    fi
+    
+    # Setup mocks as needed
+    mock_async_setup
+}
+
+# =============================================================================
+# Core Setup and Basic Functions Tests
+# =============================================================================
+
+@test 'Theme loads without errors' {
+    run prompt_purity_enhanced_setup
+    assert $state equals 0
+}
+
+@test 'Human time function formats correctly for full time components' {
+    run prompt_purity_enhanced_human_time 165392
+    assert "$output" same_as "⌚︎ 1d 21h 56m 32s"
+}
+
+@test 'Human time shows only seconds for short durations' {
+    run prompt_purity_enhanced_human_time 5
+    assert "$output" same_as "⌚︎ 5s"
+}
+
+@test 'Human time shows minutes and seconds' {
+    run prompt_purity_enhanced_human_time 125
+    assert "$output" same_as "⌚︎ 2m 5s"
+}
+
+@test 'Human time shows hours, minutes and seconds' {
+    run prompt_purity_enhanced_human_time 3725
+    assert "$output" same_as "⌚︎ 1h 2m 5s"
+}
+
+@test 'Human time shows days and hours' {
+    run prompt_purity_enhanced_human_time 90000
+    assert "$output" same_as "⌚︎ 1d 1h 0s"
+}
+
+@test 'Color getter returns default when not set' {
+    run prompt_purity_enhanced_get_color "test_color" "blue"
+    assert "$output" equals "blue"
+}
+
+@test 'Color getter returns custom value when set' {
+    zstyle ':prompt:purity-enhanced:test_color' color "red"
+    run prompt_purity_enhanced_get_color "test_color" "blue"
+    assert "$output" equals "red"
+}
+
+@test 'Color getter handles empty custom value' {
+    zstyle ':prompt:purity-enhanced:test_color' color ""
+    run prompt_purity_enhanced_get_color "test_color" "blue"
+    assert "$output" equals "blue"
+}
+
+@test 'String length calculation works correctly' {
+    run prompt_purity_enhanced_string_length "hello world"
+    assert "$output" equals "11"
+}
+
+@test 'String length handles empty string' {
+    run prompt_purity_enhanced_string_length ""
+    assert "$output" equals "0"
+}
+
+@test 'String length handles special characters' {
+    run prompt_purity_enhanced_string_length "test→with→arrows"
+    # This test may need adjustment based on actual implementation
+    assert $state equals 0
+}
+
+# =============================================================================
+# Performance Monitoring Tests
+# =============================================================================
+
+@test 'Performance start initializes timer' {
+    run prompt_purity_enhanced_perf_start "test_operation"
+    assert $state equals 0
+}
+
+@test 'Performance end calculates duration' {
+    prompt_purity_enhanced_perf_start "test_operation"
+    sleep 0.1
+    run prompt_purity_enhanced_perf_end "test_operation"
+    assert $state equals 0
+}
+
+# =============================================================================
+# Cache System Tests
+# =============================================================================
+
+@test 'Cache initialization creates required variables' {
+    run prompt_purity_enhanced_cache_init
+    assert $state equals 0
+}
+
+@test 'Cache key generation produces valid key' {
+    run prompt_purity_enhanced_generate_cache_key "test" "data"
+    assert "$output" contains "test"
+}
+
+@test 'Cache validity check with non-existent cache' {
+    run prompt_purity_enhanced_cache_valid "nonexistent_key"
+    assert $state equals 1
+}
+
+@test 'File change detection with non-existent file' {
+    run prompt_purity_enhanced_file_changed "/nonexistent/file"
+    assert $state equals 1
+}
+
+# =============================================================================
+# Command Execution Time Tests
+# =============================================================================
+
+@test 'Execution time shows when threshold exceeded' {
+    cmd_timestamp=$((EPOCHSECONDS - 10))
+    PURITY_CMD_MAX_EXEC_TIME=5
+    
+    run prompt_purity_enhanced_cmd_exec_time
+    assert "$output" contains "10s"
+}
+
+@test 'Execution time hidden when below threshold' {
+    cmd_timestamp=$((EPOCHSECONDS - 3))
+    PURITY_CMD_MAX_EXEC_TIME=5
+    
+    run prompt_purity_enhanced_cmd_exec_time
+    assert "$output" is_empty
+}
+
+@test 'Execution time handles missing timestamp' {
+    unset cmd_timestamp
+    PURITY_CMD_MAX_EXEC_TIME=5
+    
+    run prompt_purity_enhanced_cmd_exec_time
+    assert "$output" is_empty
+}
+
+# =============================================================================
+# Setup and Configuration Tests
+# =============================================================================
+
+@test 'Setup configures prompt correctly' {
+    run prompt_purity_enhanced_setup
+    assert $state equals 0
+    # Verify key prompt components are set
+    assert "$PROMPT" is_not_empty
+}
+
+@test 'Setup handles custom configuration' {
+    PURITY_SHOW_HOST=1
+    PURITY_SHOW_USER=1
+    run prompt_purity_enhanced_setup
+    assert $state equals 0
+}
+
+@test 'Setup initializes hooks' {
+    run prompt_purity_enhanced_setup
+    assert $state equals 0
+    # Verify preexec and precmd hooks are installed
+}
+
+@teardown {
+    # Clean up mocks and state
+    mock_async_cleanup
+}

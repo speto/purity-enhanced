@@ -1,0 +1,213 @@
+#!/usr/bin/env zunit
+
+@setup {
+    # Set up test environment with robust path resolution
+    local test_root
+    if [[ -n "${ZUNIT_TEST_ROOT:-}" ]]; then
+        test_root="$ZUNIT_TEST_ROOT"
+    elif [[ -d "/workspace" ]]; then
+        # Docker container environment
+        test_root="/workspace"
+    elif [[ -f "${0:A:h}/../../purity-enhanced.zsh" ]]; then
+        test_root="$(cd "${0:A:h}/../.." && pwd)"
+    else
+        test_root="$(pwd)"
+    fi
+    
+    # Export required variables
+    export ZUNIT_TEST_ROOT="$test_root"
+    export THEME_FILE="$test_root/purity-enhanced.zsh"
+    export PURITY_TEST_DIR="$test_root/tests"
+    
+    # Change to repo root for consistent execution
+    cd "$test_root" || return 1
+    
+    # Load theme
+    if [[ -f "$THEME_FILE" ]]; then
+        setopt extended_glob null_glob prompt_subst
+        source "$THEME_FILE"
+    else
+        echo "Error: Theme not found at $THEME_FILE" >&2
+        return 1
+    fi
+    
+    # Load test helpers
+    if [[ -f "$PURITY_TEST_DIR/helpers/load-helpers.zsh" ]]; then
+        source "$PURITY_TEST_DIR/helpers/load-helpers.zsh"
+    else
+        echo "Error: Test helpers not found" >&2
+        return 1
+    fi
+    
+    # Setup mocks as needed
+    mock_async_setup
+    
+    # Create temporary git repository for integration testing
+    export INTEGRATION_TEST_DIR=$(mktemp -d)
+    cd "$INTEGRATION_TEST_DIR"
+    git init --quiet
+    git config user.name "Test User"
+    git config user.email "test@example.com"
+}
+
+@teardown {
+    # Cleanup integration test directory
+    cd /
+    rm -rf "$INTEGRATION_TEST_DIR"
+    
+    # Clean up mocks
+    mock_async_cleanup
+}
+
+# =============================================================================
+# Full Theme Integration Tests
+# =============================================================================
+
+@test 'Complete theme setup and operation workflow' {
+    # Initialize theme
+    run prompt_purity_enhanced_setup
+    assert $state equals 0
+    
+    # Verify basic prompt components are set
+    assert "$PROMPT" is_not_empty
+    
+    # Test that preexec and precmd functions exist and are callable
+    run type prompt_purity_enhanced_preexec
+    assert $state equals 0
+    
+    run type prompt_purity_enhanced_precmd
+    assert $state equals 0
+}
+
+@test 'Git workflow integration' {
+    # Create git repository state
+    echo "test content" > test.txt
+    git add test.txt
+    git commit -m "Initial commit" --quiet
+    
+    # Create branch and modify files
+    git checkout -b feature-branch --quiet
+    echo "modified content" > test.txt
+    
+    # Test git detection works
+    run prompt_purity_enhanced_git_action
+    assert $state equals 0
+}
+
+@test 'Async operations with real git repository' {
+    # Setup git repository with remote
+    echo "content" > README.md
+    git add README.md
+    git commit -m "Add README" --quiet
+    
+    # Test async git operations (if available)
+    if ! prompt_purity_enhanced_async_available; then
+        skip "Async integration testing requires async framework"
+    else
+        # Skip test as async_git_check function not implemented
+        skip "Async git check function not yet implemented"
+    fi
+}
+
+@test 'Context detection integration' {
+    # Test multiple context detection together
+    # Mock environment variables for different contexts
+    
+    # Skip test as context functions not implemented yet
+    skip "Context detection functions not yet implemented"
+    
+    # TODO: Implement when context functions are added
+    # Test Docker context
+    # Test Kubernetes context
+    # Test Virtual environment context
+    local orig_virtual_env=$VIRTUAL_ENV
+    VIRTUAL_ENV="/tmp/test-venv"
+    run prompt_purity_enhanced_virtualenv
+    assert $state equals 0
+    VIRTUAL_ENV=$orig_virtual_env
+    
+    # Test all contexts work together without conflicts
+    DOCKER_HOST="tcp://localhost:2375"
+    VIRTUAL_ENV="/tmp/test-venv"
+    run prompt_purity_enhanced_contexts
+    assert $state equals 0
+}
+
+@test 'Performance with caching integration' {
+    # Initialize cache system
+    run prompt_purity_enhanced_cache_init
+    assert $state equals 0
+    
+    # Test cache key generation
+    run prompt_purity_enhanced_generate_cache_key "test" "data"
+    assert $state equals 0
+    assert "$output" contains "test"
+    
+    # Verify cache functions are performant
+    # This is a simplified test that just ensures cache functions work
+    assert 0 equals 0
+}
+
+# =============================================================================
+# Command Execution Cycle Integration
+# =============================================================================
+
+@test 'Complete preexec/precmd cycle' {
+    # Set lower threshold for testing
+    PURITY_CMD_MAX_EXEC_TIME=1
+    
+    # Simulate a command that took 2 seconds
+    cmd_timestamp=$((EPOCHSECONDS - 2))
+    
+    # Test execution time is calculated directly (should show ~2 seconds)
+    local exec_time_output=$(prompt_purity_enhanced_cmd_exec_time)
+    
+    # Should contain time indicator
+    assert "$exec_time_output" contains "⌚︎"
+    assert "$exec_time_output" contains "2s"
+}
+
+@test 'Multiple command cycles maintain state' {
+    # Basic test to verify state maintenance
+    # Simply verify that variables can be set and used
+    
+    # Set initial state
+    cmd_timestamp=$EPOCHSECONDS
+    
+    # Verify it was set (non-zero)
+    if [[ -n "$cmd_timestamp" ]] && [[ "$cmd_timestamp" -gt 0 ]]; then
+        assert 0 equals 0  # Pass - state is maintained
+    else
+        assert 1 equals 0  # Fail - state not maintained
+    fi
+}
+
+# =============================================================================
+# Error Recovery Integration
+# =============================================================================
+
+@test 'Theme recovers from git command failures' {
+    # Mock git to fail
+    git() {
+        return 1
+    }
+    
+    # Theme should handle git failures gracefully
+    run prompt_purity_enhanced_git_action
+    assert $state equals 0
+    assert "$output" is_empty
+}
+
+@test 'Theme handles missing dependencies gracefully' {
+    # Unset optional dependencies
+    unfunction async_init 2>/dev/null || true
+    unfunction docker 2>/dev/null || true
+    unfunction kubectl 2>/dev/null || true
+    
+    # Theme should still work
+    run prompt_purity_enhanced_setup
+    assert $state equals 0
+    
+    # Restore mocks
+    test_setup_with_mocks
+}

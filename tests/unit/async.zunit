@@ -1,0 +1,308 @@
+#!/usr/bin/env zunit
+
+@setup {
+    # Set up test environment with robust path resolution
+    local test_root
+    if [[ -n "${ZUNIT_TEST_ROOT:-}" ]]; then
+        test_root="$ZUNIT_TEST_ROOT"
+    elif [[ -d "/workspace" ]]; then
+        # Docker container environment
+        test_root="/workspace"
+    elif [[ -f "${0:A:h}/../../purity-enhanced.zsh" ]]; then
+        test_root="$(cd "${0:A:h}/../.." && pwd)"
+    else
+        test_root="$(pwd)"
+    fi
+    
+    # Export required variables
+    export ZUNIT_TEST_ROOT="$test_root"
+    export THEME_FILE="$test_root/purity-enhanced.zsh"
+    export PURITY_TEST_DIR="$test_root/tests"
+    
+    # Change to repo root for consistent execution
+    cd "$test_root" || return 1
+    
+    # Load theme
+    if [[ -f "$THEME_FILE" ]]; then
+        setopt extended_glob null_glob prompt_subst
+        source "$THEME_FILE"
+    else
+        echo "Error: Theme not found at $THEME_FILE" >&2
+        return 1
+    fi
+    
+    # Load test helpers
+    if [[ -f "$PURITY_TEST_DIR/helpers/load-helpers.zsh" ]]; then
+        source "$PURITY_TEST_DIR/helpers/load-helpers.zsh"
+    else
+        echo "Error: Test helpers not found" >&2
+        return 1
+    fi
+    
+    # Setup mocks as needed (customize per test)
+    mock_async_setup
+}
+
+@teardown {
+    # Clean up async mocks
+    mock_async_cleanup
+}
+
+# =============================================================================
+# Async Availability Tests
+# =============================================================================
+
+@test 'Async functions available when zsh-async loaded' {
+    # Mock async functions are already set up by mock_async_setup
+    # Just verify they work
+    
+    run prompt_purity_enhanced_async_available
+    assert $state equals 0
+}
+
+@test 'Async functions unavailable when zsh-async not loaded' {
+    # Ensure async functions don't exist
+    unfunction async_init 2>/dev/null || true
+    unfunction async_start_worker 2>/dev/null || true
+    
+    run prompt_purity_enhanced_async_available
+    assert $state equals 1
+}
+
+# =============================================================================
+# Async Initialization Tests
+# =============================================================================
+
+@test 'Async initialization function exists' {
+    run type prompt_purity_enhanced_async_init
+    assert $state equals 0
+}
+
+@test 'Context workers initialization function exists' {
+    run type prompt_purity_enhanced_init_context_workers
+    assert $state equals 0
+}
+
+# =============================================================================
+# Async Callback Tests
+# =============================================================================
+
+@test 'Async callback function exists' {
+    run type prompt_purity_enhanced_async_callback
+    assert $state equals 0
+}
+
+@test 'Context callback function exists' {
+    run type prompt_purity_enhanced_context_callback
+    assert $state equals 0
+}
+
+@test 'Async callback handles git worker response' {
+    # Setup mock async environment
+    mock_async_setup
+    
+    # Test git worker response handling
+    local test_output="branch|main|dirty|1|ahead|2"
+    mock_async_callback "prompt_purity_enhanced_git_worker" 0 "$test_output"
+    
+    # Verify callback was processed
+    assert $? equals 0
+}
+
+@test 'Async callback handles context worker response' {
+    # Setup mock async environment
+    mock_async_setup
+    
+    # Test context worker response handling
+    local test_output="docker|2 containers|k8s|production"
+    mock_async_callback "prompt_purity_enhanced_context_worker" 0 "$test_output"
+    
+    # Verify callback was processed
+    assert $? equals 0
+}
+
+@test 'Async callback handles invalid worker response' {
+    # Setup mock async environment
+    mock_async_setup
+    
+    # Test invalid worker response handling
+    mock_async_callback "unknown_worker" 1 "error_output"
+    
+    # Should handle gracefully
+    assert $? equals 0
+}
+
+# =============================================================================
+# Async Worker Functions Tests
+# =============================================================================
+
+@test 'All async worker functions exist' {
+    local workers=(
+        "prompt_purity_enhanced_async_git_fetch"
+        "prompt_purity_enhanced_async_git_status"
+        "prompt_purity_enhanced_async_git_commits"
+        "prompt_purity_enhanced_async_git_worktree"
+        "prompt_purity_enhanced_async_git_info"
+        "prompt_purity_enhanced_async_docker_status"
+        "prompt_purity_enhanced_async_k8s_context"
+        "prompt_purity_enhanced_async_language_versions"
+        "prompt_purity_enhanced_async_cloud_info"
+        "prompt_purity_enhanced_async_infra_info"
+    )
+    
+    for worker in "${workers[@]}"; do
+        run type "$worker"
+        assert $state equals 0
+    done
+}
+
+# =============================================================================
+# Async Trigger and Update Tests
+# =============================================================================
+
+@test 'Async update trigger function exists' {
+    run type prompt_purity_enhanced_trigger_async_updates
+    assert $state equals 0
+}
+
+@test 'Async updates are triggered correctly' {
+    # Setup mock async environment
+    mock_async_setup
+    
+    # Initialize async to enable updates
+    prompt_purity_enhanced_async_init=1
+    PURITY_CACHE_ENABLED=1
+    
+    # Trigger async updates and capture exit code
+    run prompt_purity_enhanced_trigger_async_updates
+    
+    # Function should return successfully
+    assert $state equals 0
+}
+
+@test 'Async workers handle concurrent execution' {
+    # Setup concurrent execution testing
+    mock_concurrent_execution
+    
+    # Run multiple workers concurrently
+    run run_concurrent 5 "echo 'test'"
+    
+    assert "$output" contains "CONCURRENT_COMPLETE"
+}
+
+# =============================================================================
+# Async Error Handling Tests
+# =============================================================================
+
+@test 'Async workers handle command failures gracefully' {
+    # Setup mock async with failure
+    mock_async_setup
+    
+    # Test failure handling
+    run mock_async_worker failure
+    
+    assert $state equals 1
+    assert "$output" contains "error_output"
+}
+
+@test 'Async workers handle timeout scenarios' {
+    # Setup timeout simulation
+    mock_timeout_setup
+    
+    # Test command with timeout
+    run with_timeout 1 sleep 10
+    
+    assert $state equals 124
+    assert "$output" contains "TIMEOUT_EXCEEDED"
+}
+
+@test 'Async workers handle resource exhaustion' {
+    # Setup resource limits
+    mock_resource_limits
+    
+    # Test with memory limit
+    run with_memory_limit 50 echo "test"
+    
+    assert $state equals 0
+}
+
+# =============================================================================
+# Async Communication Tests
+# =============================================================================
+
+@test 'Async worker output format is correct' {
+    # Setup mock async
+    mock_async_setup
+    
+    # Test worker output format
+    run mock_async_worker "key|value|status|ok"
+    
+    assert "$output" same_as "key|value|status|ok"
+}
+
+@test 'Async worker data serialization works' {
+    # Setup mock async
+    mock_async_setup
+    
+    # Test data serialization
+    local test_data="complex|data|with|pipes"
+    run mock_async_worker "$test_data"
+    
+    assert "$output" same_as "$test_data"
+}
+
+@test 'Async worker cleanup happens correctly' {
+    # Setup mock async
+    mock_async_setup
+    
+    # Start and stop worker
+    async_start_worker test_worker
+    assert "$MOCK_ASYNC_WORKER" equals "test_worker"
+    
+    async_stop_worker test_worker
+    assert "$MOCK_ASYNC_WORKER" is_empty
+}
+
+# =============================================================================
+# Async Performance Tests
+# =============================================================================
+
+@test 'Async operations complete within reasonable time' {
+    # Setup performance benchmarking
+    mock_benchmark_setup
+    
+    # Benchmark async operation
+    run benchmark "async_test" 10 "mock_async_worker success 0"
+    
+    assert "$output" contains "BENCHMARK"
+}
+
+@test 'Async workers do not block main thread' {
+    # Setup mock async
+    mock_async_setup
+    
+    # Start the test worker
+    async_start_worker test_worker
+    
+    # Define a test callback
+    test_callback() { return 0; }
+    
+    # Start async job that would block if synchronous
+    async_job test_worker test_callback sleep 0.1
+    
+    # Main thread should continue immediately
+    assert $? equals 0
+}
+
+@test 'Multiple async workers can run simultaneously' {
+    # Setup mock async
+    mock_async_setup
+    
+    # Start multiple workers
+    async_start_worker worker1
+    async_start_worker worker2
+    async_start_worker worker3
+    
+    # All workers should be able to run
+    assert $? equals 0
+}

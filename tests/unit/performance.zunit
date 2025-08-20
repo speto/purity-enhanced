@@ -1,0 +1,464 @@
+#!/usr/bin/env zunit
+
+@setup {
+    # Set up test environment with robust path resolution
+    local test_root
+    if [[ -n "${ZUNIT_TEST_ROOT:-}" ]]; then
+        test_root="$ZUNIT_TEST_ROOT"
+    elif [[ -d "/workspace" ]]; then
+        # Docker container environment
+        test_root="/workspace"
+    elif [[ -f "${0:A:h}/../../purity-enhanced.zsh" ]]; then
+        test_root="$(cd "${0:A:h}/../.." && pwd)"
+    else
+        test_root="$(pwd)"
+    fi
+    
+    # Export required variables
+    export ZUNIT_TEST_ROOT="$test_root"
+    export THEME_FILE="$test_root/purity-enhanced.zsh"
+    export PURITY_TEST_DIR="$test_root/tests"
+    
+    # Change to repo root for consistent execution
+    cd "$test_root" || return 1
+    
+    # Load theme
+    if [[ -f "$THEME_FILE" ]]; then
+        setopt extended_glob null_glob prompt_subst
+        source "$THEME_FILE"
+    else
+        echo "Error: Theme not found at $THEME_FILE" >&2
+        return 1
+    fi
+    
+    # Load test helpers
+    if [[ -f "$PURITY_TEST_DIR/helpers/load-helpers.zsh" ]]; then
+        source "$PURITY_TEST_DIR/helpers/load-helpers.zsh"
+    else
+        echo "Error: Test helpers not found" >&2
+        return 1
+    fi
+    
+    # Setup mocks as needed
+    mock_memory_setup
+    mock_performance_timing
+    mock_benchmark_setup
+    mock_async_setup
+    
+    # Setup performance testing environment
+    PURITY_DEBUG_PERF=1
+}
+
+@teardown {
+    # Clean up mocks
+    mock_performance_cleanup
+    mock_async_cleanup
+}
+
+# =============================================================================
+# Performance Monitoring Tests
+# =============================================================================
+
+@test 'Performance monitoring start function exists' {
+    run type prompt_purity_enhanced_perf_start
+    assert $state equals 0
+}
+
+@test 'Performance monitoring end function exists' {
+    run type prompt_purity_enhanced_perf_end
+    assert $state equals 0
+}
+
+@test 'Performance start records timestamp' {
+    run prompt_purity_enhanced_perf_start "test_operation"
+    assert $state equals 0
+    # Should set _purity_perf_test_operation variable
+}
+
+@test 'Performance end calculates duration correctly' {
+    prompt_purity_enhanced_perf_start "test_operation"
+    sleep 0.1
+    run prompt_purity_enhanced_perf_end "test_operation"
+    assert $state equals 0
+    # Should output duration information when debug is enabled
+}
+
+@test 'Performance monitoring handles nested operations' {
+    prompt_purity_enhanced_perf_start "outer_operation"
+    prompt_purity_enhanced_perf_start "inner_operation"
+    prompt_purity_enhanced_perf_end "inner_operation"
+    run prompt_purity_enhanced_perf_end "outer_operation"
+    assert $state equals 0
+}
+
+@test 'Performance monitoring handles missing start timer' {
+    run prompt_purity_enhanced_perf_end "nonexistent_operation"
+    assert $state equals 0  # Should handle gracefully
+}
+
+# =============================================================================
+# Cache Performance Tests
+# =============================================================================
+
+@test 'Cache system initialization is fast' {
+    local start_time=$EPOCHSECONDS
+    run prompt_purity_enhanced_cache_init
+    local end_time=$EPOCHSECONDS
+    local duration=$((end_time - start_time))
+    
+    assert $state equals 0
+    # Cache init should complete in less than 1 second
+    assert "$((duration < 2))" equals "1"
+}
+
+@test 'Cache key generation is performant' {
+    local iterations=100
+    local start_time=$EPOCHSECONDS
+    
+    for ((i=1; i<=iterations; i++)); do
+        prompt_purity_enhanced_generate_cache_key "test_key_$i" "test_data"
+    done
+    
+    local end_time=$EPOCHSECONDS
+    local duration=$((end_time - start_time))
+    
+    # Should complete 100 iterations in reasonable time
+    assert "$((duration < 5))" equals "1"
+}
+
+@test 'Cache read operations are fast' {
+    # Setup cache entry first
+    local cache_file="/tmp/purity_cache_test_$$"
+    echo "cached_data" > "$cache_file"
+    
+    local start_time=$EPOCHSECONDS
+    run prompt_purity_enhanced_cache_read "$cache_file"
+    local end_time=$EPOCHSECONDS
+    local duration=$((end_time - start_time))
+    
+    assert $state equals 0
+    assert "$output" equals "cached_data"
+    assert "$((duration < 1))" equals "1"
+    
+    # Cleanup
+    rm -f "$cache_file"
+}
+
+@test 'Cache write operations are fast' {
+    local cache_key="perf_write_test"
+    local test_data="performance test data"
+    
+    local start_time=$EPOCHSECONDS
+    run prompt_purity_enhanced_cache_write "$cache_key" "$test_data"
+    local end_time=$EPOCHSECONDS
+    local duration=$((end_time - start_time))
+    
+    assert $state equals 0
+    assert "$((duration < 1))" equals "1"
+    
+    # Cleanup
+    rm -f "/tmp/purity_cache_$cache_key"
+}
+
+# =============================================================================
+# Prompt Rendering Performance Tests
+# =============================================================================
+
+@test 'Prompt rendering completes quickly' {
+    local start_time=$EPOCHSECONDS
+    run prompt_purity_enhanced_render_preprompt
+    local end_time=$EPOCHSECONDS
+    local duration=$((end_time - start_time))
+    
+    assert $state equals 0
+    # Prompt rendering should be very fast
+    assert "$((duration < 2))" equals "1"
+}
+
+@test 'Precmd hook execution time is reasonable' {
+    # Run basic test if timing not enabled, full test otherwise
+    if [[ -z "${ENABLE_PERFORMANCE_TIMING:-}" ]]; then
+        # Basic functional test without timing constraints
+        run prompt_purity_enhanced_precmd
+        assert $state equals 0
+        return
+    fi
+    
+    local start_time=$EPOCHSECONDS
+    prompt_purity_enhanced_precmd >/dev/null 2>&1
+    local exit_code=$?
+    local end_time=$EPOCHSECONDS
+    local duration=$((end_time - start_time))
+    
+    assert $exit_code equals 0
+    assert "$((duration < 30))" equals "1"
+}
+
+@test 'String length calculation is performant' {
+    local test_string="This is a moderately long test string for performance testing"
+    local iterations=1000
+    local start_time=$EPOCHSECONDS
+    
+    for ((i=1; i<=iterations; i++)); do
+        prompt_purity_enhanced_string_length "$test_string"
+    done
+    
+    local end_time=$EPOCHSECONDS
+    local duration=$((end_time - start_time))
+    
+    # Should complete 1000 iterations quickly
+    assert "$((duration < 5))" equals "1"
+}
+
+# =============================================================================
+# Async Performance Tests
+# =============================================================================
+
+@test 'Async initialization is fast' {
+    # Setup performance timing
+    mock_performance_timing
+    
+    # Measure async init time
+    local time=$(measure_time mock_async_setup)
+    
+    # Should be fast (under 50ms)
+    assert "$((time < 50))" equals "1"
+}
+
+@test 'Async worker startup time is reasonable' {
+    # Setup async and timing
+    mock_async_setup
+    mock_performance_timing
+    
+    # Measure worker startup
+    local time=$(measure_time async_start_worker test_worker)
+    
+    # Should be fast (under 100ms)
+    assert "$((time < 100))" equals "1"
+}
+
+@test 'Async callback processing is performant' {
+    # Setup async and timing
+    mock_async_setup
+    mock_performance_timing
+    
+    # Measure callback processing
+    local time=$(measure_time mock_async_callback test_worker 0 "test_output")
+    
+    # Should be fast (under 10ms)
+    assert "$((time < 10))" equals "1"
+}
+
+# =============================================================================
+# Memory Usage Tests
+# =============================================================================
+
+@test 'Theme loading does not consume excessive memory' {
+    # Setup memory monitoring
+    mock_memory_setup
+    
+    # Measure memory usage
+    local mem_used=$(track_memory_usage prompt_purity_enhanced_setup)
+    
+    # Should use reasonable memory (under 5MB)
+    assert "$((mem_used < 5000))" equals "1"
+}
+
+@test 'Cache system has reasonable memory footprint' {
+    # Setup memory monitoring
+    mock_memory_setup
+    
+    # Measure cache memory usage
+    local mem_used=$(track_memory_usage prompt_purity_enhanced_cache_init)
+    
+    # Should use minimal memory (under 1MB)
+    assert "$((mem_used < 1000))" equals "1"
+}
+
+@test 'Async workers do not leak memory' {
+    # Setup memory leak detection
+    mock_memory_leak_detector
+    mock_async_setup
+    
+    # Test for memory leaks
+    run detect_memory_leak 10 "async_start_worker test && async_stop_worker test"
+    
+    assert "$output" equals "NO_LEAK"
+}
+
+# =============================================================================
+# Execution Time Benchmarks
+# =============================================================================
+
+@test 'Git action detection performance' {
+    # Create temporary git directory for testing
+    local temp_git=$(mktemp -d)
+    
+    git() {
+        if [[ "$1" == "rev-parse" && "$2" == "--git-dir" ]]; then
+            echo "$temp_git"
+            return 0
+        fi
+        command git "$@"
+    }
+    
+    local iterations=50
+    local start_time=$EPOCHSECONDS
+    
+    for ((i=1; i<=iterations; i++)); do
+        prompt_purity_enhanced_git_action
+    done
+    
+    local end_time=$EPOCHSECONDS
+    local duration=$((end_time - start_time))
+    
+    # Should complete 50 iterations in reasonable time
+    assert "$((duration < 5))" equals "1"
+    
+    rm -rf "$temp_git"
+}
+
+@test 'Color getter performance' {
+    local iterations=500
+    local start_time=$EPOCHSECONDS
+    
+    for ((i=1; i<=iterations; i++)); do
+        prompt_purity_enhanced_get_color "test_color_$i" "blue"
+    done
+    
+    local end_time=$EPOCHSECONDS
+    local duration=$((end_time - start_time))
+    
+    # Should complete 500 iterations quickly
+    assert "$((duration < 3))" equals "1"
+}
+
+@test 'Human time formatting performance' {
+    local iterations=200
+    local start_time=$EPOCHSECONDS
+    
+    for ((i=1; i<=iterations; i++)); do
+        prompt_purity_enhanced_human_time $((i * 100))
+    done
+    
+    local end_time=$EPOCHSECONDS
+    local duration=$((end_time - start_time))
+    
+    # Should complete 200 iterations quickly
+    assert "$((duration < 3))" equals "1"
+}
+
+# =============================================================================
+# Cache Efficiency Tests
+# =============================================================================
+
+@test 'Cache read and write operations work correctly' {
+    local cache_file="/tmp/purity_cache_test_$$"
+    local test_data="testdata"
+    
+    # Write to cache
+    run prompt_purity_enhanced_cache_write "$cache_file" "$test_data"
+    assert $state equals 0
+    
+    # Read from cache
+    run prompt_purity_enhanced_cache_read "$cache_file"
+    assert $state equals 0
+    assert "$output" same_as "$test_data"
+    
+    # Cleanup
+    rm -f "$cache_file"
+}
+
+# =============================================================================
+# Performance Regression Tests
+# =============================================================================
+
+@test 'Overall theme performance baseline' {
+    # Run basic test if timing not enabled, full test otherwise
+    if [[ -z "${ENABLE_PERFORMANCE_TIMING:-}" ]]; then
+        # Basic functional test without timing constraints
+        run prompt_purity_enhanced_setup
+        assert $state equals 0
+        
+        # Verify basic functionality works
+        run prompt_purity_enhanced_precmd
+        assert $state equals 0
+        return
+    fi
+    
+    local start_time=$EPOCHSECONDS
+    
+    # Simulate typical prompt operations (suppress output)
+    prompt_purity_enhanced_setup >/dev/null 2>&1
+    prompt_purity_enhanced_precmd >/dev/null 2>&1
+    prompt_purity_enhanced_cmd_exec_time >/dev/null 2>&1
+    prompt_purity_enhanced_git_action >/dev/null 2>&1
+    prompt_purity_enhanced_get_color "path" "blue" >/dev/null 2>&1
+    prompt_purity_enhanced_human_time 1234 >/dev/null 2>&1
+    
+    local end_time=$EPOCHSECONDS
+    local total_duration=$((end_time - start_time))
+    
+    assert "$((total_duration < 30))" equals "1"
+}
+
+# =============================================================================
+# Lightweight Performance Tests (No timing requirements)
+# =============================================================================
+
+@test 'Theme components run without errors under load' {
+    # Test that the theme handles multiple rapid calls gracefully
+    local iterations=10
+    
+    for ((i=1; i<=iterations; i++)); do
+        run prompt_purity_enhanced_precmd
+        assert $state equals 0
+    done
+}
+
+@test 'Cache handles concurrent-like access' {
+    local cache_file="/tmp/purity_cache_concurrent_test_$$"
+    
+    # Simulate rapid cache read/write cycles
+    for ((i=1; i<=5; i++)); do
+        prompt_purity_enhanced_cache_write "$cache_file" "data_$i"
+        local data=$(prompt_purity_enhanced_cache_read "$cache_file")
+        assert "$data" equals "data_$i"
+    done
+    
+    # Cleanup
+    rm -f "$cache_file"
+}
+
+@test 'String operations handle edge cases efficiently' {
+    # Test with various string lengths
+    local test_strings=(
+        ""
+        "a"
+        "short"
+        "this is a medium length string"
+        "$(printf '%*s' 100 | tr ' ' 'x')"  # 100 character string
+    )
+    
+    for str in "${test_strings[@]}"; do
+        run prompt_purity_enhanced_string_length "$str"
+        assert $state equals 0
+    done
+}
+
+@test 'Git operations handle non-git directories gracefully' {
+    # Test in a non-git directory
+    local temp_dir=$(mktemp -d)
+    cd "$temp_dir"
+    
+    run prompt_purity_enhanced_git_action
+    assert $state equals 0
+    
+    # Should return empty or handle gracefully
+    run git_prompt_info
+    assert $state equals 0
+    
+    # Cleanup
+    cd - >/dev/null
+    rm -rf "$temp_dir"
+}

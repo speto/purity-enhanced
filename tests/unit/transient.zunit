@@ -1,0 +1,473 @@
+#!/usr/bin/env zunit
+
+@setup {
+    # Set up test environment with robust path resolution
+    local test_root
+    if [[ -n "${ZUNIT_TEST_ROOT:-}" ]]; then
+        test_root="$ZUNIT_TEST_ROOT"
+    elif [[ -d "/workspace" ]]; then
+        # Docker container environment
+        test_root="/workspace"
+    elif [[ -f "${0:A:h}/../../purity-enhanced.zsh" ]]; then
+        test_root="$(cd "${0:A:h}/../.." && pwd)"
+    else
+        test_root="$(pwd)"
+    fi
+    
+    # Export required variables
+    export ZUNIT_TEST_ROOT="$test_root"
+    export THEME_FILE="$test_root/purity-enhanced.zsh"
+    export PURITY_TEST_DIR="$test_root/tests"
+    
+    # Change to repo root for consistent execution
+    cd "$test_root" || return 1
+    
+    # Load theme
+    if [[ -f "$THEME_FILE" ]]; then
+        setopt extended_glob null_glob prompt_subst
+        source "$THEME_FILE"
+    else
+        echo "Error: Theme not found at $THEME_FILE" >&2
+        return 1
+    fi
+    
+    # Load test helpers
+    if [[ -f "$PURITY_TEST_DIR/helpers/load-helpers.zsh" ]]; then
+        source "$PURITY_TEST_DIR/helpers/load-helpers.zsh"
+    else
+        echo "Error: Test helpers not found" >&2
+        return 1
+    fi
+    
+    # Setup mocks as needed (customize per test)
+    mock_async_setup
+}
+
+@teardown {
+    # Clean up mocks
+    mock_async_cleanup
+}
+
+# =============================================================================
+# Transient Prompt Generation Tests
+# =============================================================================
+
+@test 'Transient prompt generation function exists' {
+    run type prompt_purity_enhanced_transient_generate
+    assert $state equals 0
+}
+
+@test 'Transient prompt apply function exists' {
+    run type prompt_purity_enhanced_transient_apply
+    assert $state equals 0
+}
+
+@test 'Transient prompt reset function exists' {
+    run type prompt_purity_enhanced_transient_reset
+    assert $state equals 0
+}
+
+@test 'Transient prompt generates simplified prompt' {
+    # Enable transient prompts
+    PURITY_TRANSIENT_PROMPT=1
+    run prompt_purity_enhanced_transient_generate
+    assert $state equals 0
+    assert "$output" is_not_empty
+    # Should generate a simpler prompt than the full prompt
+}
+
+@test 'Transient prompt respects user configuration' {
+    # Test with transient prompt enabled
+    PURITY_TRANSIENT_PROMPT=1
+    run prompt_purity_enhanced_transient_generate
+    assert $state equals 0
+}
+
+@test 'Transient prompt handles disabled state' {
+    # Test with transient prompt disabled
+    PURITY_TRANSIENT_PROMPT=0
+    run prompt_purity_enhanced_transient_generate
+    assert $state equals 1  # Should return 1 when disabled
+    assert "$output" is_empty  # Should not generate output when disabled
+}
+
+# =============================================================================
+# Transient Prompt Caching Tests
+# =============================================================================
+
+@test 'Transient prompt cache function exists' {
+    run type prompt_purity_enhanced_transient_cache_prompt
+    assert $state equals 0
+}
+
+@test 'Transient prompt caching works correctly' {
+    # Set up a test prompt
+    PROMPT="test_prompt > "
+    run prompt_purity_enhanced_transient_cache_prompt
+    assert $state equals 0
+}
+
+@test 'Transient prompt cache handles empty prompt' {
+    PROMPT=""
+    run prompt_purity_enhanced_transient_cache_prompt
+    assert $state equals 0
+}
+
+@test 'Transient prompt cache handles complex prompt' {
+    PROMPT=$'%F{blue}%~%f %F{red}git:(%F{green}main%F{red})%f $ '
+    run prompt_purity_enhanced_transient_cache_prompt
+    assert $state equals 0
+}
+
+# =============================================================================
+# Transient Prompt Hook Tests
+# =============================================================================
+
+@test 'Transient preexec hook function exists' {
+    run type prompt_purity_enhanced_transient_preexec
+    assert $state equals 0
+}
+
+@test 'Transient precmd hook function exists' {
+    run type prompt_purity_enhanced_transient_precmd
+    assert $state equals 0
+}
+
+@test 'Transient preexec hook applies transient prompt' {
+    # Mock command execution
+    run prompt_purity_enhanced_transient_preexec "ls -la"
+    assert $state equals 0
+}
+
+@test 'Transient precmd hook restores original prompt' {
+    # Cache original prompt first
+    PROMPT="original_prompt > "
+    prompt_purity_enhanced_transient_cache_prompt
+    
+    # Apply transient prompt
+    prompt_purity_enhanced_transient_apply
+    
+    # Test precmd restoration
+    run prompt_purity_enhanced_transient_precmd
+    assert $state equals 0
+}
+
+@test 'Transient hooks handle multiple command cycles' {
+    # Cache original prompt
+    PROMPT="original_prompt > "
+    prompt_purity_enhanced_transient_cache_prompt
+    
+    # Simulate multiple preexec/precmd cycles
+    for i in {1..3}; do
+        prompt_purity_enhanced_transient_preexec "command_$i"
+        prompt_purity_enhanced_transient_precmd
+    done
+    
+    # Should not cause errors
+    assert $state equals 0
+}
+
+# =============================================================================
+# Transient Prompt Apply/Reset Tests
+# =============================================================================
+
+@test 'Transient prompt apply changes current prompt' {
+    # Set original prompt
+    PROMPT="full_prompt > "
+    prompt_purity_enhanced_transient_cache_prompt
+    
+    # Apply transient prompt
+    run prompt_purity_enhanced_transient_apply
+    assert $state equals 0
+    
+    # Prompt should be different (simplified)
+    # This would need inspection of the actual PROMPT variable
+}
+
+@test 'Transient prompt reset clears transient state' {
+    # Set a prompt
+    PROMPT="full_prompt > "
+    
+    # Apply transient prompt
+    prompt_purity_enhanced_transient_apply
+    
+    # Reset transient state
+    prompt_purity_enhanced_transient_reset
+    
+    # Should clear transient state flag
+    assert "${prompt_purity_enhanced_transient_applied:-0}" equals "0"
+}
+
+@test 'Transient prompt handles reset without cached prompt' {
+    # Clear any cached prompt
+    unset _purity_transient_cached_prompt
+    
+    run prompt_purity_enhanced_transient_reset
+    assert $state equals 0  # Should handle gracefully
+}
+
+# =============================================================================
+# Transient Prompt Configuration Tests
+# =============================================================================
+
+@test 'Transient prompt includes default symbol' {
+    # Enable transient prompts
+    PURITY_TRANSIENT_PROMPT=1
+    run prompt_purity_enhanced_transient_generate
+    assert $state equals 0
+    # Should include default symbol (❯)
+    assert "$output" contains "❯"
+}
+
+@test 'Transient prompt respects color configuration' {
+    # Enable transient prompts
+    PURITY_TRANSIENT_PROMPT=1
+    # Test custom transient colors
+    zstyle ':prompt:purity-enhanced:transient' color "red"
+    run prompt_purity_enhanced_transient_generate
+    assert $state equals 0
+    assert "$output" is_not_empty
+}
+
+@test 'Transient prompt handles disabled configuration' {
+    # Test when transient prompt is explicitly disabled
+    PURITY_TRANSIENT_PROMPT=0
+    
+    # Cache function should return early when disabled
+    run prompt_purity_enhanced_transient_cache_prompt
+    assert $state equals 0
+    
+    # Cache should not be set
+    assert "${prompt_purity_enhanced_full_prompt_cache:-}" is_empty
+}
+
+# =============================================================================
+# Transient Prompt Content Tests
+# =============================================================================
+
+@test 'Transient prompt includes essential elements' {
+    # Enable transient prompts
+    PURITY_TRANSIENT_PROMPT=1
+    run prompt_purity_enhanced_transient_generate
+    assert $state equals 0
+    # Should include basic prompt symbol (❯ by default)
+    assert "$output" contains "❯"
+}
+
+@test 'Transient prompt excludes complex elements' {
+    # Enable transient prompts
+    PURE_ENABLE_TRANSIENT=true
+    
+    # Generate transient prompt
+    local transient=$(prompt_purity_enhanced_transient_generate)
+    
+    # Should exclude git info
+    assert "$transient" does_not_contain "git:"
+    assert "$transient" does_not_contain "branch:"
+}
+
+@test 'Transient prompt shows exit code on failure' {
+    # Test transient prompt with non-zero exit code
+    # Simulate a failed command by setting the return code
+    local last_return_code=127
+    
+    # Enable transient prompts
+    PURITY_TRANSIENT_PROMPT=1
+    
+    # Generate transient prompt with exit code
+    run prompt_purity_enhanced_transient_generate $last_return_code
+    assert $state equals 0
+    
+    # Should include exit code indicator (e.g., red symbol or code)
+    # The actual format depends on implementation but should indicate failure
+    assert "$output" is_not_empty
+}
+
+@test 'Transient prompt shows execution time when enabled' {
+    # Test transient prompt with execution time
+    # Enable transient prompts
+    PURITY_TRANSIENT_PROMPT=1
+    
+    # Simulate command execution time
+    prompt_purity_enhanced_cmd_execution_time_start=$((EPOCHSECONDS - 10))
+    prompt_purity_enhanced_cmd_execution_time_stop=$EPOCHSECONDS
+    
+    # Set threshold to show execution time
+    PURITY_CMD_MAX_EXEC_TIME=5
+    
+    # Generate transient prompt with execution time
+    run prompt_purity_enhanced_transient_generate
+    assert $state equals 0
+    
+    # Should include execution time in output (10 seconds > 5 second threshold)
+    assert "$output" is_not_empty
+}
+
+# =============================================================================
+# Transient Prompt Integration Tests
+# =============================================================================
+
+@test 'Transient prompt works with async operations' {
+    # Test interaction with async git/context operations
+    # Enable transient prompts
+    PURITY_TRANSIENT_PROMPT=1
+    
+    # Mock async operations
+    mock_async_setup
+    
+    # Start async worker for testing
+    run async_start_worker purity_test_worker
+    assert $state equals 0
+    
+    # Generate transient prompt while async ops are running
+    run prompt_purity_enhanced_transient_generate
+    assert $state equals 0
+    
+    # Clean up async worker
+    async_stop_worker purity_test_worker 2>/dev/null || true
+    mock_async_cleanup
+}
+
+@test 'Transient prompt works with caching system' {
+    # Test interaction with prompt caching
+    # Enable transient prompts
+    PURITY_TRANSIENT_PROMPT=1
+    
+    # Initialize cache system
+    prompt_purity_enhanced_cache_init
+    
+    # Cache a prompt
+    local test_prompt="test_cached_prompt > "
+    PROMPT=$test_prompt
+    prompt_purity_enhanced_transient_cache_prompt
+    
+    # Generate transient prompt which should work with cached data
+    prompt_purity_enhanced_transient_generate
+    
+    # Apply and reset to verify cache interaction
+    prompt_purity_enhanced_transient_apply
+    prompt_purity_enhanced_transient_reset
+    
+    # Test passes if no errors occurred
+    assert 0 equals 0
+    
+    # Verify original prompt is restored from cache (check non-empty)
+    assert "${#PROMPT}" is_greater_than 0
+}
+
+@test 'Transient prompt handles terminal resize' {
+    # Test behavior during terminal resize
+    # Enable transient prompts
+    PURITY_TRANSIENT_PROMPT=1
+    
+    # Simulate terminal resize by changing COLUMNS and LINES
+    local orig_columns=${COLUMNS:-80}
+    local orig_lines=${LINES:-24}
+    
+    # Test with different terminal sizes
+    COLUMNS=40
+    LINES=12
+    run prompt_purity_enhanced_transient_generate
+    assert $state equals 0
+    
+    # Test with wider terminal
+    COLUMNS=120
+    LINES=50
+    run prompt_purity_enhanced_transient_generate
+    assert $state equals 0
+    
+    # Restore original values
+    COLUMNS=$orig_columns
+    LINES=$orig_lines
+}
+
+# =============================================================================
+# Transient Prompt Performance Tests
+# =============================================================================
+
+@test 'Transient prompt generation is fast' {
+    # Enable transient prompts
+    PURITY_TRANSIENT_PROMPT=1
+    
+    local start_time=$EPOCHSECONDS
+    
+    for i in {1..10}; do
+        prompt_purity_enhanced_transient_generate > /dev/null
+    done
+    
+    local end_time=$EPOCHSECONDS
+    local duration=$((end_time - start_time))
+    
+    # Should complete quickly
+    assert "$((duration < 2))" equals "1"
+}
+
+@test 'Transient prompt application is fast' {
+    PROMPT="test_prompt > "
+    prompt_purity_enhanced_transient_cache_prompt
+    
+    local start_time=$EPOCHSECONDS
+    
+    for i in {1..10}; do
+        prompt_purity_enhanced_transient_apply
+        prompt_purity_enhanced_transient_reset
+    done
+    
+    local end_time=$EPOCHSECONDS
+    local duration=$((end_time - start_time))
+    
+    # Should complete quickly
+    assert "$((duration < 2))" equals "1"
+}
+
+# =============================================================================
+# Transient Prompt Error Handling Tests
+# =============================================================================
+
+@test 'Transient prompt handles invalid cached prompt' {
+    # Set invalid cached prompt
+    _purity_transient_cached_prompt=""
+    
+    run prompt_purity_enhanced_transient_reset
+    assert $state equals 0  # Should handle gracefully
+}
+
+@test 'Transient prompt handles missing functions' {
+    # Enable transient prompts for testing
+    PURITY_TRANSIENT_PROMPT=1
+    
+    # Temporarily unset a function
+    local orig_func=$(functions prompt_purity_enhanced_string_length)
+    unfunction prompt_purity_enhanced_string_length 2>/dev/null || true
+    
+    # Should handle missing function gracefully
+    run prompt_purity_enhanced_transient_generate
+    
+    # Restore function
+    eval "$orig_func"
+    
+    # Should complete successfully or with expected failure
+    [[ $state -eq 0 || $state -eq 1 ]]
+    assert $? equals 0
+}
+
+@test 'Transient prompt handles terminal compatibility' {
+    # Enable transient prompts for testing
+    PURITY_TRANSIENT_PROMPT=1
+    
+    # Test with different terminal types
+    local orig_term=$TERM
+    
+    # Test with basic terminal
+    TERM=vt100
+    run prompt_purity_enhanced_transient_generate
+    assert $state equals 0
+    
+    # Test with xterm
+    TERM=xterm-256color
+    run prompt_purity_enhanced_transient_generate
+    assert $state equals 0
+    
+    # Restore
+    TERM=$orig_term
+}

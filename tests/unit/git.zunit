@@ -1,0 +1,308 @@
+#!/usr/bin/env zunit
+
+@setup {
+    # Set up test environment with robust path resolution
+    local test_root
+    if [[ -n "${ZUNIT_TEST_ROOT:-}" ]]; then
+        test_root="$ZUNIT_TEST_ROOT"
+    elif [[ -d "/workspace" ]]; then
+        # Docker container environment
+        test_root="/workspace"
+    elif [[ -f "${0:A:h}/../../purity-enhanced.zsh" ]]; then
+        test_root="$(cd "${0:A:h}/../.." && pwd)"
+    else
+        test_root="$(pwd)"
+    fi
+    
+    # Export required variables
+    export ZUNIT_TEST_ROOT="$test_root"
+    export THEME_FILE="$test_root/purity-enhanced.zsh"
+    export PURITY_TEST_DIR="$test_root/tests"
+    
+    # Change to repo root for consistent execution
+    cd "$test_root" || return 1
+    
+    # Load theme
+    if [[ -f "$THEME_FILE" ]]; then
+        setopt extended_glob null_glob prompt_subst
+        source "$THEME_FILE"
+    else
+        echo "Error: Theme not found at $THEME_FILE" >&2
+        return 1
+    fi
+    
+    # Load test helpers
+    if [[ -f "$PURITY_TEST_DIR/helpers/load-helpers.zsh" ]]; then
+        source "$PURITY_TEST_DIR/helpers/load-helpers.zsh"
+    else
+        echo "Error: Test helpers not found" >&2
+        return 1
+    fi
+    
+    # Setup mocks as needed
+    mock_async_setup
+}
+
+@teardown {
+    # Clean up mocks and temp repos
+    mock_async_cleanup
+}
+
+# =============================================================================
+# Git Action Detection Tests
+# =============================================================================
+
+@test 'Git action detects rebase' {
+    # Mock git directory structure
+    local temp_git=$(mktemp -d)
+    mkdir -p "$temp_git/rebase-merge"
+    
+    # Override git command to return our temp directory
+    git() {
+        if [[ "$1" == "rev-parse" && "$2" == "--git-dir" ]]; then
+            echo "$temp_git"
+            return 0
+        fi
+        command git "$@"
+    }
+    
+    run prompt_purity_enhanced_git_action
+    assert "$output" contains "rebase-m"
+    
+    rm -rf "$temp_git"
+}
+
+@test 'Git action detects merge' {
+    local temp_git=$(mktemp -d)
+    touch "$temp_git/MERGE_HEAD"
+    
+    git() {
+        if [[ "$1" == "rev-parse" && "$2" == "--git-dir" ]]; then
+            echo "$temp_git"
+            return 0
+        fi
+        command git "$@"
+    }
+    
+    run prompt_purity_enhanced_git_action
+    assert "$output" contains "merge"
+    
+    rm -rf "$temp_git"
+}
+
+@test 'Git action detects cherry-pick' {
+    local temp_git=$(mktemp -d)
+    touch "$temp_git/CHERRY_PICK_HEAD"
+    
+    git() {
+        if [[ "$1" == "rev-parse" && "$2" == "--git-dir" ]]; then
+            echo "$temp_git"
+            return 0
+        fi
+        command git "$@"
+    }
+    
+    run prompt_purity_enhanced_git_action
+    assert "$output" contains "cherry-pick"
+    
+    rm -rf "$temp_git"
+}
+
+@test 'Git action detects bisect' {
+    local temp_git=$(mktemp -d)
+    touch "$temp_git/BISECT_LOG"
+    
+    git() {
+        if [[ "$1" == "rev-parse" && "$2" == "--git-dir" ]]; then
+            echo "$temp_git"
+            return 0
+        fi
+        command git "$@"
+    }
+    
+    run prompt_purity_enhanced_git_action
+    assert "$output" contains "bisect"
+    
+    rm -rf "$temp_git"
+}
+
+@test 'Git action returns empty when no action detected' {
+    local temp_git=$(mktemp -d)
+    
+    git() {
+        if [[ "$1" == "rev-parse" && "$2" == "--git-dir" ]]; then
+            echo "$temp_git"
+            return 0
+        fi
+        command git "$@"
+    }
+    
+    run prompt_purity_enhanced_git_action
+    assert "$output" is_empty
+    
+    rm -rf "$temp_git"
+}
+
+@test 'Git action handles git command failure' {
+    git() {
+        return 1
+    }
+    
+    run prompt_purity_enhanced_git_action
+    assert "$output" is_empty
+}
+
+# =============================================================================
+# Async Git Operations Tests
+# =============================================================================
+
+@test 'Async git fetch function exists' {
+    run type prompt_purity_enhanced_async_git_fetch
+    assert $state equals 0
+}
+
+@test 'Async git status function exists' {
+    run type prompt_purity_enhanced_async_git_status
+    assert $state equals 0
+}
+
+@test 'Async git commits function exists' {
+    run type prompt_purity_enhanced_async_git_commits
+    assert $state equals 0
+}
+
+@test 'Async git worktree function exists' {
+    run type prompt_purity_enhanced_async_git_worktree
+    assert $state equals 0
+}
+
+@test 'Async git info function exists' {
+    run type prompt_purity_enhanced_async_git_info
+    assert $state equals 0
+}
+
+# =============================================================================
+# Git Integration Tests
+# =============================================================================
+
+@test 'Git operations handle non-git directories' {
+    local temp_dir=$(mktemp -d)
+    cd "$temp_dir"
+    
+    run prompt_purity_enhanced_git_action
+    assert "$output" is_empty
+    
+    cd - > /dev/null
+    rm -rf "$temp_dir"
+}
+
+@test 'Git operations handle corrupted git directory' {
+    local temp_dir=$(mktemp -d)
+    mkdir "$temp_dir/.git"
+    echo "invalid" > "$temp_dir/.git/HEAD"
+    cd "$temp_dir"
+    
+    # Should not crash
+    run prompt_purity_enhanced_git_action
+    assert $state equals 0
+    
+    cd - > /dev/null
+    rm -rf "$temp_dir"
+}
+
+# =============================================================================
+# Git Status and Branch Tests
+# =============================================================================
+
+@test 'Git status async worker handles clean repository' {
+    # Create clean mock repository
+    local repo=$(mock_git_repo_create)
+    cd "$repo"
+    
+    # Test git status
+    run git status --porcelain
+    
+    assert "$output" is_empty
+    mock_git_repo_cleanup "$repo"
+}
+
+@test 'Git status async worker handles dirty repository' {
+    # Create dirty mock repository
+    local repo=$(mock_git_repo_create)
+    mock_git_repo_dirty "$repo"
+    cd "$repo"
+    
+    # Test git status
+    run git status --porcelain
+    
+    assert "$output" is_not_empty
+    mock_git_repo_cleanup "$repo"
+}
+
+@test 'Git branch detection works correctly' {
+    # Create mock repository
+    local repo=$(mock_git_repo_create)
+    cd "$repo"
+    
+    # Test branch detection
+    run git rev-parse --abbrev-ref HEAD
+    
+    assert "$output" equals "main" || assert "$output" equals "master"
+    mock_git_repo_cleanup "$repo"
+}
+
+@test 'Git commit count calculation works' {
+    # Create mock repository with commits
+    local repo=$(mock_git_repo_create)
+    cd "$repo"
+    
+    # Add more commits
+    echo "second" >> file.txt
+    git add file.txt
+    git commit -m "Second commit" --quiet
+    
+    # Test commit count
+    run git rev-list --count HEAD
+    
+    assert "$output" equals "2"
+    mock_git_repo_cleanup "$repo"
+}
+
+# =============================================================================
+# Git Remote and Fetch Tests
+# =============================================================================
+
+@test 'Git fetch async worker handles network errors' {
+    # Setup network failure mock
+    mock_network_setup
+    
+    # Test fetch with network failure
+    run with_network_failure 1.0 echo "fetch failed"
+    
+    assert $state equals 1
+    assert "$output" contains "NETWORK_ERROR"
+}
+
+@test 'Git fetch async worker handles timeout' {
+    # Setup timeout mock
+    mock_timeout_setup
+    
+    # Test fetch with timeout
+    run with_timeout 1 sleep 10
+    
+    assert $state equals 124
+    assert "$output" contains "TIMEOUT_EXCEEDED"
+}
+
+@test 'Git remote status detection works' {
+    # Create mock repository with remotes
+    local repo=$(mock_git_repo_create)
+    mock_git_repo_with_remotes "$repo"
+    cd "$repo"
+    
+    # Test remote detection
+    run git remote -v
+    
+    assert "$output" contains "origin"
+    mock_git_repo_cleanup "$repo"
+}
