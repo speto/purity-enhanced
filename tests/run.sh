@@ -253,9 +253,6 @@ if command -v zunit &> /dev/null && [[ -d tests ]]; then
         FAILED_SUITES+=("compatibility")
     fi
     
-    # Note: Benchmark tests removed in favor of real-world performance testing
-    # Use tests/performance-benchmark.sh for performance evaluation
-    
     # Calculate total tests
     TOTAL_TESTS=$((TOTAL_PASSED + TOTAL_FAILED + TOTAL_ERRORS + TOTAL_SKIPPED))
     

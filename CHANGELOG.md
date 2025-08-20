@@ -11,7 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - N/A
 
 ### Changed
-- N/A
+- **Performance benchmarks**: Refactored monolithic 270-line benchmark script into modular system
+  - Split into individual benchmark scripts (first-prompt, render-time, memory-stability, async-operations)
+  - Added orchestrator script maintaining original output format and metrics
+  - Enabled individual benchmark execution for targeted testing
+  - Improved maintainability while preserving all original measurements
 
 ### Deprecated
 - N/A

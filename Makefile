@@ -6,7 +6,7 @@ test:
 
 performance:
 	docker build --target test -t purity-test .
-	docker run --rm purity-test /workspace/tests/performance-benchmark.sh
+	docker run --rm purity-test /workspace/tests/performance/run-benchmarks.sh
 
 example:
 	docker build --target example -t purity-example .
