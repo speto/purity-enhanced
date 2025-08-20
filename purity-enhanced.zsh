@@ -158,6 +158,7 @@ typeset -g prompt_purity_enhanced_transient_command_time    # Last command execu
 typeset -g prompt_purity_enhanced_transient_timestamp       # Timestamp for time-based transient
 typeset -g prompt_purity_enhanced_transient_applied         # Flag indicating transient is active
 typeset -g prompt_purity_enhanced_full_prompt_cache         # Cache of last full prompt
+typeset -gi prompt_purity_enhanced_precmd_count=0           # Counter for background cleanup delay
 
 # turns seconds into human readable time
 # 165392 => 1d 21h 56m 32s
@@ -347,7 +348,7 @@ prompt_purity_enhanced_cache_init() {
 	# Skip if caching is disabled
 	[[ "${PURITY_CACHE_ENABLED:-1}" == "0" ]] && return 1
 	
-	# Create cache directory if it doesn't exist
+	# Create cache directory if it doesn't exist (already pre-created in setup)
 	if [[ ! -d "$PURITY_CACHE_DIR" ]]; then
 		mkdir -p "$PURITY_CACHE_DIR" 2>/dev/null || {
 			echo "Failed to create cache directory: $PURITY_CACHE_DIR" >&2
@@ -355,8 +356,7 @@ prompt_purity_enhanced_cache_init() {
 		}
 	fi
 	
-	# Cleanup old cache files on initialization
-	prompt_purity_cache_cleanup
+	# Skip expensive cleanup on init - defer to background
 }
 
 # ================================================================================================
@@ -365,8 +365,8 @@ prompt_purity_enhanced_cache_init() {
 # ================================================================================================
 
 # Get cached value with optional TTL override
-# Usage: prompt_purity_cache_get "key" [ttl_seconds]
-prompt_purity_cache_get() {
+# Usage: prompt_purity_enhanced_cache_get "key" [ttl_seconds]  
+prompt_purity_enhanced_cache_get() {
 	local key="$1"
 	local ttl="${2:-}"
 	local cache_file="$PURITY_CACHE_DIR/${key}.cache"
@@ -398,8 +398,8 @@ prompt_purity_cache_get() {
 }
 
 # Set cached value  
-# Usage: prompt_purity_cache_set "key" "value"
-prompt_purity_cache_set() {
+# Usage: prompt_purity_enhanced_cache_set "key" "value"
+prompt_purity_enhanced_cache_set() {
 	local key="$1"
 	local value="$2"
 	local cache_file="$PURITY_CACHE_DIR/${key}.cache"
@@ -423,8 +423,8 @@ prompt_purity_cache_set() {
 }
 
 # Invalidate specific cache entry
-# Usage: prompt_purity_cache_invalidate "key"
-prompt_purity_cache_invalidate() {
+# Usage: prompt_purity_enhanced_cache_invalidate "key"
+prompt_purity_enhanced_cache_invalidate() {
 	local key="$1"
 	local cache_file="$PURITY_CACHE_DIR/${key}.cache"
 	
@@ -439,8 +439,8 @@ prompt_purity_cache_invalidate() {
 }
 
 # Cleanup old cache files
-# Usage: prompt_purity_cache_cleanup
-prompt_purity_cache_cleanup() {
+# Usage: prompt_purity_enhanced_cache_cleanup
+prompt_purity_enhanced_cache_cleanup() {
 	# Skip if caching is disabled  
 	[[ "${PURITY_CACHE_ENABLED:-1}" == "0" ]] && return 1
 	
@@ -450,18 +450,21 @@ prompt_purity_cache_cleanup() {
 	# Find and remove cache files older than the longest TTL (5 minutes)
 	local max_age="${PURITY_CACHE_TTL_FAST:-300}"
 	
-	# Use find to remove old files (compatible with macOS and Linux)
-	find "$PURITY_CACHE_DIR" -name "*.cache" -type f -mtime +"$((max_age/60))"m -delete 2>/dev/null || {
-		# Fallback: manual cleanup if find command fails
-		local current_time="${EPOCHSECONDS:-$(date +%s)}"
-		local file file_time file_age
-		for file in "$PURITY_CACHE_DIR"/*.cache(N); do
-			[[ -f "$file" ]] || continue
-			file_time=$(stat -f %m "$file" 2>/dev/null || stat -c %Y "$file" 2>/dev/null || echo 0)
-			file_age=$((current_time - file_time))
-			[[ $file_age -gt $max_age ]] && rm -f "$file" 2>/dev/null
-		done
-	}
+	# Use mmin for minutes (available on most systems)
+	# First try with -mmin, then fallback to manual cleanup
+	if find "$PURITY_CACHE_DIR" -name "*.cache" -type f -mmin "+5" -delete 2>/dev/null; then
+		return 0
+	fi
+	
+	# Fallback: manual cleanup if find command fails or doesn't support -mmin
+	local current_time="${EPOCHSECONDS:-$(date +%s)}"
+	local file file_time file_age
+	for file in "$PURITY_CACHE_DIR"/*.cache(N); do
+		[[ -f "$file" ]] || continue
+		file_time=$(stat -f %m "$file" 2>/dev/null || stat -c %Y "$file" 2>/dev/null || echo 0)
+		file_age=$((current_time - file_time))
+		[[ $file_age -gt $max_age ]] && rm -f "$file" 2>/dev/null
+	done
 	
 	# Remove empty cache directory if no cache files remain
 	[[ -d "$PURITY_CACHE_DIR" ]] && rmdir "$PURITY_CACHE_DIR" 2>/dev/null || true
@@ -556,8 +559,8 @@ prompt_purity_enhanced_get_cached_context() {
 	
 	# Try smart key first, fallback to legacy key for backwards compatibility
 	local cached_result
-	cached_result="$(prompt_purity_cache_get "$cache_key" 2>/dev/null)" || \
-	cached_result="$(prompt_purity_cache_get "$context_type" 2>/dev/null)"
+	cached_result="$(prompt_purity_enhanced_cache_get "$cache_key" 2>/dev/null)" || \
+	cached_result="$(prompt_purity_enhanced_cache_get "$context_type" 2>/dev/null)"
 	
 	if [[ -n "$cached_result" ]]; then
 		echo "$cached_result"
@@ -573,8 +576,8 @@ prompt_purity_enhanced_set_cached_context() {
 	local cache_key="$(prompt_purity_enhanced_generate_cache_key "$context_type")"
 	
 	# Set both smart key and legacy key for transition period
-	prompt_purity_cache_set "$cache_key" "$content"
-	prompt_purity_cache_set "$context_type" "$content"  # Legacy fallback
+	prompt_purity_enhanced_cache_set "$cache_key" "$content"
+	prompt_purity_enhanced_cache_set "$context_type" "$content"  # Legacy fallback
 }
 
 # Check if async is available
@@ -593,7 +596,7 @@ prompt_purity_enhanced_async_available() {
 # ASYNC WORKER INITIALIZATION AND MANAGEMENT
 # ================================================================================================
 
-# Initialize all async workers
+# Initialize async workers progressively (performance optimized)
 prompt_purity_enhanced_async_init() {
 	# Return if async is already initialized
 	(( ${prompt_purity_enhanced_async_init:-0} )) && return
@@ -603,12 +606,12 @@ prompt_purity_enhanced_async_init() {
 		return 1
 	fi
 	
-	# Initialize cache directory and cleanup old cache files
+	# Initialize cache directory (lightweight, no cleanup)
 	prompt_purity_enhanced_cache_init
 	
 	prompt_purity_enhanced_async_init=1
 
-	# Initialize git worker (existing)
+	# Only initialize git worker (essential for prompt) - skip context workers initially
 	async_start_worker "prompt_purity_enhanced" -u -n
 	async_register_callback "prompt_purity_enhanced" prompt_purity_enhanced_async_callback
 	
@@ -617,9 +620,6 @@ prompt_purity_enhanced_async_init() {
 		export GIT_OPTIONAL_LOCKS=0
 		export GIT_TERMINAL_PROMPT=0
 	"
-	
-	# Initialize context workers
-	prompt_purity_enhanced_init_context_workers
 }
 
 # Initialize context-specific async workers
@@ -638,6 +638,34 @@ prompt_purity_enhanced_init_context_workers() {
 				export GIT_TERMINAL_PROMPT=0
 				export CLOUDSDK_CORE_DISABLE_PROMPTS=1
 			"
+		fi
+	done
+}
+
+# Initialize context workers on-demand (called from precmd when needed)
+prompt_purity_enhanced_init_context_workers_lazy() {
+	# Only initialize workers that are enabled and not already running
+	local workers=()
+	
+	# Add enabled workers
+	(( ${PURITY_ASYNC_LANGUAGES:-1} )) && workers+=("context_languages")
+	(( ${PURITY_ASYNC_DOCKER:-1} )) && workers+=("context_docker")  
+	(( ${PURITY_ASYNC_K8S:-1} )) && workers+=("context_k8s")
+	(( ${PURITY_ASYNC_CLOUD:-1} )) && workers+=("context_cloud")
+	(( ${PURITY_ASYNC_INFRA:-1} )) && workers+=("context_infra")
+	
+	for worker in $workers; do
+		if ! (( ${prompt_purity_enhanced_workers_init[$worker]:-0} )); then
+			async_start_worker "$worker" -u -n 2>/dev/null && {
+				async_register_callback "$worker" prompt_purity_enhanced_context_callback 2>/dev/null
+				prompt_purity_enhanced_workers_init[$worker]=1
+				
+				# Set up worker environment with timeout settings
+				async_worker_eval "$worker" "
+					export GIT_TERMINAL_PROMPT=0
+					export CLOUDSDK_CORE_DISABLE_PROMPTS=1
+				" 2>/dev/null || true
+			}
 		fi
 	done
 }
@@ -862,16 +890,16 @@ prompt_purity_enhanced_async_docker_status() {
 	
 	# Check cache first with fast return
 	local cached_result
-	if cached_result="$(prompt_purity_cache_get "$cache_key" "${PURITY_CACHE_TTL_MEDIUM}" 2>/dev/null)" && [[ -n "$cached_result" ]]; then
+	if cached_result="$(prompt_purity_enhanced_cache_get "$cache_key" "${PURITY_CACHE_TTL_MEDIUM}" 2>/dev/null)" && [[ -n "$cached_result" ]]; then
 		echo "$cached_result"
 		return
 	fi
 	
 	# Try legacy cache for backwards compatibility
-	if cached_result="$(prompt_purity_cache_get "docker" "${PURITY_CACHE_TTL_MEDIUM}" 2>/dev/null)" && [[ -n "$cached_result" ]]; then
+	if cached_result="$(prompt_purity_enhanced_cache_get "docker" "${PURITY_CACHE_TTL_MEDIUM}" 2>/dev/null)" && [[ -n "$cached_result" ]]; then
 		echo "$cached_result"
 		# Migrate to new cache key
-		prompt_purity_cache_set "$cache_key" "$cached_result"
+		prompt_purity_enhanced_cache_set "$cache_key" "$cached_result"
 		return
 	fi
 	
@@ -908,12 +936,12 @@ prompt_purity_enhanced_async_docker_status() {
 	
 	# Cache result using both smart key and legacy key
 	if [[ -n "$result" ]]; then
-		prompt_purity_cache_set "$cache_key" "$result"
-		prompt_purity_cache_set "docker" "$result"  # Legacy compatibility
+		prompt_purity_enhanced_cache_set "$cache_key" "$result"
+		prompt_purity_enhanced_cache_set "docker" "$result"  # Legacy compatibility
 	else
 		# Cache negative results to avoid repeated expensive calls
-		prompt_purity_cache_set "$cache_key" "docker:none"
-		prompt_purity_cache_set "docker" "docker:none"
+		prompt_purity_enhanced_cache_set "$cache_key" "docker:none"
+		prompt_purity_enhanced_cache_set "docker" "docker:none"
 	fi
 	
 	echo "$result"
@@ -930,16 +958,16 @@ prompt_purity_enhanced_async_k8s_context() {
 	
 	# Check cache first with fast return
 	local cached_result
-	if cached_result="$(prompt_purity_cache_get "$cache_key" "${PURITY_CACHE_TTL_MEDIUM}" 2>/dev/null)" && [[ -n "$cached_result" ]]; then
+	if cached_result="$(prompt_purity_enhanced_cache_get "$cache_key" "${PURITY_CACHE_TTL_MEDIUM}" 2>/dev/null)" && [[ -n "$cached_result" ]]; then
 		echo "$cached_result"
 		return
 	fi
 	
 	# Try legacy cache for backwards compatibility
-	if cached_result="$(prompt_purity_cache_get "k8s" "${PURITY_CACHE_TTL_MEDIUM}" 2>/dev/null)" && [[ -n "$cached_result" ]]; then
+	if cached_result="$(prompt_purity_enhanced_cache_get "k8s" "${PURITY_CACHE_TTL_MEDIUM}" 2>/dev/null)" && [[ -n "$cached_result" ]]; then
 		echo "$cached_result"
 		# Migrate to new cache key
-		prompt_purity_cache_set "$cache_key" "$cached_result"
+		prompt_purity_enhanced_cache_set "$cache_key" "$cached_result"
 		return
 	fi
 	
@@ -950,8 +978,8 @@ prompt_purity_enhanced_async_k8s_context() {
 	# Handle timeout/error cases gracefully
 	if [[ $? -eq 124 ]]; then
 		# Timeout occurred - cache the timeout state to avoid repeated attempts
-		prompt_purity_cache_set "$cache_key" "k8s:timeout"
-		prompt_purity_cache_set "k8s" "k8s:timeout"
+		prompt_purity_enhanced_cache_set "$cache_key" "k8s:timeout"
+		prompt_purity_enhanced_cache_set "k8s" "k8s:timeout"
 		return
 	fi
 	
@@ -967,8 +995,8 @@ prompt_purity_enhanced_async_k8s_context() {
 	fi
 	
 	# Cache result using both smart key and legacy key
-	prompt_purity_cache_set "$cache_key" "$result"
-	prompt_purity_cache_set "k8s" "$result"  # Legacy compatibility
+	prompt_purity_enhanced_cache_set "$cache_key" "$result"
+	prompt_purity_enhanced_cache_set "k8s" "$result"  # Legacy compatibility
 	
 	[[ "$result" != "k8s:none" && "$result" != "k8s:timeout" ]] && echo "$result"
 }
@@ -982,16 +1010,16 @@ prompt_purity_enhanced_async_language_versions() {
 	
 	# Check cache first - languages change rarely, so cache for longer
 	local cached_result
-	if cached_result="$(prompt_purity_cache_get "$cache_key" "${PURITY_CACHE_TTL_FAST}" 2>/dev/null)" && [[ -n "$cached_result" ]]; then
+	if cached_result="$(prompt_purity_enhanced_cache_get "$cache_key" "${PURITY_CACHE_TTL_FAST}" 2>/dev/null)" && [[ -n "$cached_result" ]]; then
 		echo "$cached_result"
 		return
 	fi
 	
 	# Try legacy cache for backwards compatibility
-	if cached_result="$(prompt_purity_cache_get "languages" "${PURITY_CACHE_TTL_FAST}" 2>/dev/null)" && [[ -n "$cached_result" ]]; then
+	if cached_result="$(prompt_purity_enhanced_cache_get "languages" "${PURITY_CACHE_TTL_FAST}" 2>/dev/null)" && [[ -n "$cached_result" ]]; then
 		echo "$cached_result"
 		# Migrate to new cache key
-		prompt_purity_cache_set "$cache_key" "$cached_result"
+		prompt_purity_enhanced_cache_set "$cache_key" "$cached_result"
 		return
 	fi
 	
@@ -1077,8 +1105,8 @@ prompt_purity_enhanced_async_language_versions() {
 	result="${result% }"
 	
 	# Cache result using both smart key and legacy key (even if empty to prevent repeated calls)
-	prompt_purity_cache_set "$cache_key" "${result:-languages:none}"
-	prompt_purity_cache_set "languages" "${result:-languages:none}"  # Legacy compatibility
+	prompt_purity_enhanced_cache_set "$cache_key" "${result:-languages:none}"
+	prompt_purity_enhanced_cache_set "languages" "${result:-languages:none}"  # Legacy compatibility
 	
 	[[ -n "$result" && "$result" != "languages:none" ]] && echo "$result"
 }
@@ -1092,16 +1120,16 @@ prompt_purity_enhanced_async_cloud_info() {
 	
 	# Check cache first with fast return - cloud operations are VERY slow
 	local cached_result
-	if cached_result="$(prompt_purity_cache_get "$cache_key" "${PURITY_CACHE_TTL_SLOW}" 2>/dev/null)" && [[ -n "$cached_result" ]]; then
+	if cached_result="$(prompt_purity_enhanced_cache_get "$cache_key" "${PURITY_CACHE_TTL_SLOW}" 2>/dev/null)" && [[ -n "$cached_result" ]]; then
 		echo "$cached_result"
 		return
 	fi
 	
 	# Try legacy cache for backwards compatibility
-	if cached_result="$(prompt_purity_cache_get "cloud" "${PURITY_CACHE_TTL_SLOW}" 2>/dev/null)" && [[ -n "$cached_result" ]]; then
+	if cached_result="$(prompt_purity_enhanced_cache_get "cloud" "${PURITY_CACHE_TTL_SLOW}" 2>/dev/null)" && [[ -n "$cached_result" ]]; then
 		echo "$cached_result"
 		# Migrate to new cache key
-		prompt_purity_cache_set "$cache_key" "$cached_result"
+		prompt_purity_enhanced_cache_set "$cache_key" "$cached_result"
 		return
 	fi
 	
@@ -1122,7 +1150,7 @@ prompt_purity_enhanced_async_cloud_info() {
 			local gcloud_exit=$?
 			if [[ $gcloud_exit -eq 124 ]]; then
 				# Timeout - cache this state to avoid repeated slow calls
-				prompt_purity_cache_set "gcp-timeout-${cache_key}" "timeout" 30
+				prompt_purity_enhanced_cache_set "gcp-timeout-${cache_key}" "timeout" 30
 			elif [[ -n "$gcp_project" && "$gcp_project" != "(unset)" ]]; then
 				result+="gcp:${gcp_project} "
 			fi
@@ -1133,14 +1161,14 @@ prompt_purity_enhanced_async_cloud_info() {
 	if [[ "${PURITY_SHOW_AZURE:-1}" != "0" ]] && command -v az &>/dev/null; then
 		# Check for cached timeout state first
 		local azure_timeout_key="azure-timeout-${cache_key}"
-		if ! prompt_purity_cache_get "$azure_timeout_key" 30 &>/dev/null; then
+		if ! prompt_purity_enhanced_cache_get "$azure_timeout_key" 30 &>/dev/null; then
 			local azure_sub
 			# Reduce timeout from 5s to 2s for better responsiveness
 			azure_sub=$(timeout 2 az account show --query name -o tsv 2>/dev/null)
 			local az_exit=$?
 			if [[ $az_exit -eq 124 ]]; then
 				# Timeout - cache this state to avoid repeated slow calls
-				prompt_purity_cache_set "$azure_timeout_key" "timeout" 30
+				prompt_purity_enhanced_cache_set "$azure_timeout_key" "timeout" 30
 			elif [[ -n "$azure_sub" ]]; then
 				# Truncate long subscription names for display
 				local short_sub="${azure_sub}"
@@ -1154,8 +1182,8 @@ prompt_purity_enhanced_async_cloud_info() {
 	result="${result% }"
 	
 	# Cache result using both smart key and legacy key (even if empty to prevent repeated calls)
-	prompt_purity_cache_set "$cache_key" "${result:-cloud:none}"
-	prompt_purity_cache_set "cloud" "${result:-cloud:none}"  # Legacy compatibility
+	prompt_purity_enhanced_cache_set "$cache_key" "${result:-cloud:none}"
+	prompt_purity_enhanced_cache_set "cloud" "${result:-cloud:none}"  # Legacy compatibility
 	
 	[[ -n "$result" && "$result" != "cloud:none" ]] && echo "$result"
 }
@@ -1169,16 +1197,16 @@ prompt_purity_enhanced_async_infra_info() {
 	
 	# Check cache first
 	local cached_result
-	if cached_result="$(prompt_purity_cache_get "$cache_key" "${PURITY_CACHE_TTL_SLOW}" 2>/dev/null)" && [[ -n "$cached_result" ]]; then
+	if cached_result="$(prompt_purity_enhanced_cache_get "$cache_key" "${PURITY_CACHE_TTL_SLOW}" 2>/dev/null)" && [[ -n "$cached_result" ]]; then
 		echo "$cached_result"
 		return
 	fi
 	
 	# Try legacy cache for backwards compatibility
-	if cached_result="$(prompt_purity_cache_get "infra" "${PURITY_CACHE_TTL_SLOW}" 2>/dev/null)" && [[ -n "$cached_result" ]]; then
+	if cached_result="$(prompt_purity_enhanced_cache_get "infra" "${PURITY_CACHE_TTL_SLOW}" 2>/dev/null)" && [[ -n "$cached_result" ]]; then
 		echo "$cached_result"
 		# Migrate to new cache key
-		prompt_purity_cache_set "$cache_key" "$cached_result"
+		prompt_purity_enhanced_cache_set "$cache_key" "$cached_result"
 		return
 	fi
 	
@@ -1220,8 +1248,8 @@ prompt_purity_enhanced_async_infra_info() {
 	result="${result% }"
 	
 	# Cache result using both smart key and legacy key (even if empty to prevent repeated calls)
-	prompt_purity_cache_set "$cache_key" "${result:-infra:none}"
-	prompt_purity_cache_set "infra" "${result:-infra:none}"  # Legacy compatibility
+	prompt_purity_enhanced_cache_set "$cache_key" "${result:-infra:none}"
+	prompt_purity_enhanced_cache_set "infra" "${result:-infra:none}"  # Legacy compatibility
 	
 	[[ -n "$result" && "$result" != "infra:none" ]] && echo "$result"
 }
@@ -1280,11 +1308,11 @@ prompt_purity_enhanced_async_callback() {
 		prompt_purity_enhanced_async_git_status)
 			if [[ $code -eq 0 ]]; then
 				# Parse git status output
-				local -A status
+				local -A git_status_map
 				for item in ${(z)output}; do
 					key=${item%%:*}
 					value=${item#*:}
-					status[$key]=$value
+					git_status_map[$key]=$value
 				done
 				
 				# Update state if changed
@@ -1639,10 +1667,10 @@ prompt_purity_enhanced_should_invalidate_cache() {
 			}
 			# Check for context switches via environment variables
 			local kube_env_key="k8s-context-env-${KUBECONFIG:-default}-${KUBE_NAMESPACE:-default}"
-			local cached_env="$(prompt_purity_cache_get "$kube_env_key" 60 2>/dev/null)"
+			local cached_env="$(prompt_purity_enhanced_cache_get "$kube_env_key" 60 2>/dev/null)"
 			local current_env="${KUBECONFIG:-default}-${KUBE_NAMESPACE:-default}"
 			if [[ "$cached_env" != "$current_env" ]]; then
-				prompt_purity_cache_set "$kube_env_key" "$current_env"
+				prompt_purity_enhanced_cache_set "$kube_env_key" "$current_env"
 				return 0
 			fi
 			;;
@@ -1711,10 +1739,10 @@ prompt_purity_enhanced_should_invalidate_cache() {
 			done
 			# Check for environment variable changes
 			local cloud_env_key="cloud-env-${AWS_PROFILE:-default}-${GCLOUD_PROJECT:-default}-${AZURE_SUBSCRIPTION_ID:-default}"
-			local cached_cloud_env="$(prompt_purity_cache_get "$cloud_env_key" 60 2>/dev/null)"
+			local cached_cloud_env="$(prompt_purity_enhanced_cache_get "$cloud_env_key" 60 2>/dev/null)"
 			local current_cloud_env="${AWS_PROFILE:-default}-${GCLOUD_PROJECT:-default}-${AZURE_SUBSCRIPTION_ID:-default}"
 			if [[ "$cached_cloud_env" != "$current_cloud_env" ]]; then
-				prompt_purity_cache_set "$cloud_env_key" "$current_cloud_env"
+				prompt_purity_enhanced_cache_set "$cloud_env_key" "$current_cloud_env"
 				return 0
 			fi
 			;;
@@ -1776,13 +1804,16 @@ prompt_purity_enhanced_trigger_async_updates() {
 		return
 	fi
 	
+	# Initialize context workers lazily (only when first needed)
+	prompt_purity_enhanced_init_context_workers_lazy
+	
 	# Trigger async context jobs with enhanced cache invalidation checks
 	if (( ${PURITY_ASYNC_DOCKER:-1} )); then
 		# Force update if cache should be invalidated
 		if prompt_purity_enhanced_should_invalidate_cache "docker"; then
 			local cache_key="$(prompt_purity_enhanced_generate_cache_key "docker")"
-			prompt_purity_cache_invalidate "$cache_key"
-			prompt_purity_cache_invalidate "docker"  # Legacy cleanup
+			prompt_purity_enhanced_cache_invalidate "$cache_key"
+			prompt_purity_enhanced_cache_invalidate "docker"  # Legacy cleanup
 		fi
 		async_job "context_docker" prompt_purity_enhanced_async_docker_status
 	fi
@@ -1790,8 +1821,8 @@ prompt_purity_enhanced_trigger_async_updates() {
 	if (( ${PURITY_ASYNC_K8S:-1} )); then
 		if prompt_purity_enhanced_should_invalidate_cache "k8s"; then
 			local cache_key="$(prompt_purity_enhanced_generate_cache_key "k8s")"
-			prompt_purity_cache_invalidate "$cache_key"
-			prompt_purity_cache_invalidate "k8s"  # Legacy cleanup
+			prompt_purity_enhanced_cache_invalidate "$cache_key"
+			prompt_purity_enhanced_cache_invalidate "k8s"  # Legacy cleanup
 		fi
 		async_job "context_k8s" prompt_purity_enhanced_async_k8s_context
 	fi
@@ -1799,8 +1830,8 @@ prompt_purity_enhanced_trigger_async_updates() {
 	if (( ${PURITY_ASYNC_LANGUAGES:-1} )); then
 		if prompt_purity_enhanced_should_invalidate_cache "languages"; then
 			local cache_key="$(prompt_purity_enhanced_generate_cache_key "languages")"
-			prompt_purity_cache_invalidate "$cache_key"
-			prompt_purity_cache_invalidate "languages"  # Legacy cleanup
+			prompt_purity_enhanced_cache_invalidate "$cache_key"
+			prompt_purity_enhanced_cache_invalidate "languages"  # Legacy cleanup
 		fi
 		async_job "context_languages" prompt_purity_enhanced_async_language_versions
 	fi
@@ -1808,8 +1839,8 @@ prompt_purity_enhanced_trigger_async_updates() {
 	if (( ${PURITY_ASYNC_CLOUD:-1} )); then
 		if prompt_purity_enhanced_should_invalidate_cache "cloud"; then
 			local cache_key="$(prompt_purity_enhanced_generate_cache_key "cloud")"
-			prompt_purity_cache_invalidate "$cache_key"
-			prompt_purity_cache_invalidate "cloud"  # Legacy cleanup
+			prompt_purity_enhanced_cache_invalidate "$cache_key"
+			prompt_purity_enhanced_cache_invalidate "cloud"  # Legacy cleanup
 		fi
 		async_job "context_cloud" prompt_purity_enhanced_async_cloud_info
 	fi
@@ -1817,11 +1848,14 @@ prompt_purity_enhanced_trigger_async_updates() {
 	if (( ${PURITY_ASYNC_INFRA:-1} )); then
 		if prompt_purity_enhanced_should_invalidate_cache "infra"; then
 			local cache_key="$(prompt_purity_enhanced_generate_cache_key "infra")"
-			prompt_purity_cache_invalidate "$cache_key"
-			prompt_purity_cache_invalidate "infra"  # Legacy cleanup
+			prompt_purity_enhanced_cache_invalidate "$cache_key"
+			prompt_purity_enhanced_cache_invalidate "infra"  # Legacy cleanup
 		fi
 		async_job "context_infra" prompt_purity_enhanced_async_infra_info
 	fi
+	
+	# Always return success - async job failures shouldn't fail the trigger
+	return 0
 }
 
 # Render the preprompt with current async state
@@ -1864,22 +1898,22 @@ prompt_purity_enhanced_render_preprompt() {
 	
 	# Build git status from async state
 	if [[ -n ${prompt_purity_enhanced_vcs_info[status]} ]]; then
-		local -A status
+		local -A git_status_map
 		for item in ${(z)${prompt_purity_enhanced_vcs_info[status]}}; do
 			key=${item%%:*}
 			value=${item#*:}
-			status[$key]=$value
+			git_status_map[$key]=$value
 		done
 		
 		# Convert status to symbols
 		local status_symbols=""
-		[[ -n ${status[untracked]} ]] && status_symbols+="%F{cyan}✩%f "
-		[[ -n ${status[added]} ]] && status_symbols+="%F{green}✓%f "
-		[[ -n ${status[modified]} ]] && status_symbols+="%F{blue}✶%f "
-		[[ -n ${status[deleted]} ]] && status_symbols+="%F{red}✗%f "
-		[[ -n ${status[renamed]} ]] && status_symbols+="%F{magenta}➜%f "
-		[[ -n ${status[unmerged]} ]] && status_symbols+="%F{yellow}═%f "
-		[[ -n ${status[stashed]} ]] && status_symbols+="%F{magenta}⚑%f "
+		[[ -n ${git_status_map[untracked]} ]] && status_symbols+="%F{cyan}✩%f "
+		[[ -n ${git_status_map[added]} ]] && status_symbols+="%F{green}✓%f "
+		[[ -n ${git_status_map[modified]} ]] && status_symbols+="%F{blue}✶%f "
+		[[ -n ${git_status_map[deleted]} ]] && status_symbols+="%F{red}✗%f "
+		[[ -n ${git_status_map[renamed]} ]] && status_symbols+="%F{magenta}➜%f "
+		[[ -n ${git_status_map[unmerged]} ]] && status_symbols+="%F{yellow}═%f "
+		[[ -n ${git_status_map[stashed]} ]] && status_symbols+="%F{magenta}⚑%f "
 		
 		git_status_info=" ${status_symbols% }"
 	fi
@@ -1922,12 +1956,17 @@ prompt_purity_enhanced_precmd() {
 	# shows the full path in the title
 	print -Pn '\e]0;%~\a'
 
+	# Background cache cleanup after a few prompts (non-blocking)
+	(( ++prompt_purity_enhanced_precmd_count == 3 )) && {
+		( prompt_purity_enhanced_cache_cleanup 2>/dev/null || true ) &!
+	}
+
 	# Display execution time
 	local exec_time_color=$(prompt_purity_enhanced_get_color execution_time yellow)
 	print -P " %F{$exec_time_color}$(prompt_purity_enhanced_cmd_exec_time)%f"
 
-	# Initialize async workers if not already done
-	if prompt_purity_enhanced_async_init; then
+	# Initialize async workers if not already done (defer until second prompt)
+	if (( prompt_purity_enhanced_precmd_count > 1 )) && prompt_purity_enhanced_async_init; then
 		# Load cached context data for immediate display
 		prompt_purity_enhanced_load_cached_context
 		
@@ -2020,7 +2059,7 @@ prompt_purity_enhanced_fallback_sync_context() {
 
 # Function to get current git action (rebase, merge, etc.)
 prompt_purity_enhanced_git_action() {
-	local git_dir="$(command git rev-parse --git-dir 2>/dev/null)"
+	local git_dir="$(git rev-parse --git-dir 2>/dev/null)"
 	[[ -z "$git_dir" ]] && return
 
 	local action=""
@@ -2100,22 +2139,22 @@ git_prompt_info() {
 git_prompt_status() {
 	# Use async state if available
 	if [[ -n ${prompt_purity_enhanced_vcs_info[status]} ]]; then
-		local -A status
+		local -A git_status_map
 		for item in ${(z)${prompt_purity_enhanced_vcs_info[status]}}; do
 			key=${item%%:*}
 			value=${item#*:}
-			status[$key]=$value
+			git_status_map[$key]=$value
 		done
 		
 		# Convert status to symbols
 		local status_symbols=""
-		[[ -n ${status[untracked]} ]] && status_symbols+="$ZSH_THEME_GIT_PROMPT_UNTRACKED"
-		[[ -n ${status[added]} ]] && status_symbols+="$ZSH_THEME_GIT_PROMPT_ADDED"
-		[[ -n ${status[modified]} ]] && status_symbols+="$ZSH_THEME_GIT_PROMPT_MODIFIED"
-		[[ -n ${status[deleted]} ]] && status_symbols+="$ZSH_THEME_GIT_PROMPT_DELETED"
-		[[ -n ${status[renamed]} ]] && status_symbols+="$ZSH_THEME_GIT_PROMPT_RENAMED"
-		[[ -n ${status[unmerged]} ]] && status_symbols+="$ZSH_THEME_GIT_PROMPT_UNMERGED"
-		[[ -n ${status[stashed]} ]] && status_symbols+="$ZSH_THEME_GIT_PROMPT_STASHED"
+		[[ -n ${git_status_map[untracked]} ]] && status_symbols+="$ZSH_THEME_GIT_PROMPT_UNTRACKED"
+		[[ -n ${git_status_map[added]} ]] && status_symbols+="$ZSH_THEME_GIT_PROMPT_ADDED"
+		[[ -n ${git_status_map[modified]} ]] && status_symbols+="$ZSH_THEME_GIT_PROMPT_MODIFIED"
+		[[ -n ${git_status_map[deleted]} ]] && status_symbols+="$ZSH_THEME_GIT_PROMPT_DELETED"
+		[[ -n ${git_status_map[renamed]} ]] && status_symbols+="$ZSH_THEME_GIT_PROMPT_RENAMED"
+		[[ -n ${git_status_map[unmerged]} ]] && status_symbols+="$ZSH_THEME_GIT_PROMPT_UNMERGED"
+		[[ -n ${git_status_map[stashed]} ]] && status_symbols+="$ZSH_THEME_GIT_PROMPT_STASHED"
 		
 		echo "$status_symbols"
 	elif command git rev-parse --is-inside-work-tree &>/dev/null; then
@@ -2185,9 +2224,10 @@ prompt_purity_enhanced_setup() {
 	# Set prompt options (these only work with promptinit, so we set them directly above)
 	prompt_opts=(cr subst percent)
 
-	zmodload zsh/datetime
-	zmodload zsh/zutil  # For zstyle
-	autoload -Uz add-zsh-hook
+	# Load modules only if not already loaded (performance optimization)
+	(( ! $+modules[zsh/datetime] )) && zmodload zsh/datetime
+	(( ! $+modules[zsh/zutil] )) && zmodload zsh/zutil  # For zstyle
+	(( ! $+functions[add-zsh-hook] )) && autoload -Uz add-zsh-hook
 
 	# Initialize async state
 	prompt_purity_enhanced_vcs_info=()
@@ -2222,13 +2262,18 @@ prompt_purity_enhanced_setup() {
 		fi
 		
 		# Cleanup cache files on exit
-		prompt_purity_cache_cleanup
+		prompt_purity_enhanced_cache_cleanup
 		
 		prompt_purity_enhanced_async_init=0
 	}
 	
 	# Add cleanup hook
 	add-zsh-hook zshexit prompt_purity_enhanced_cleanup
+
+	# Pre-create cache directory for immediate availability (skip expensive cleanup)
+	if [[ "${PURITY_CACHE_ENABLED:-1}" == "1" && ! -d "$PURITY_CACHE_DIR" ]]; then
+		mkdir -p "$PURITY_CACHE_DIR" 2>/dev/null || true
+	fi
 
 	# Set up default colors (can be overridden via zstyle)
 	local path_color=$(prompt_purity_enhanced_get_color path blue)
