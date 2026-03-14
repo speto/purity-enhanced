@@ -22,11 +22,12 @@
     # Change to repo root for consistent execution
     cd "$test_root" || return 1
     
-    # Load theme
-    if [[ -f "$THEME_FILE" ]]; then
-        setopt extended_glob null_glob prompt_subst
-        source "$THEME_FILE"
-    else
+	# Load theme
+	if [[ -f "$THEME_FILE" ]]; then
+		setopt extended_glob null_glob prompt_subst
+		export PURITY_SUPPRESS_ASYNC_WARNING=1
+		source "$THEME_FILE"
+	else
         echo "Error: Theme not found at $THEME_FILE" >&2
         return 1
     fi
@@ -78,9 +79,9 @@
     assert $state equals 0
 }
 
-@test 'Context workers initialization function exists' {
-    run type prompt_purity_enhanced_init_context_workers
-    assert $state equals 0
+@test 'Unified async context worker function exists' {
+	run type prompt_purity_enhanced_async_context
+	assert $state equals 0
 }
 
 # =============================================================================
@@ -98,27 +99,31 @@
 }
 
 @test 'Async callback handles git worker response' {
-    # Setup mock async environment
-    mock_async_setup
-    
-    # Test git worker response handling
-    local test_output="branch|main|dirty|1|ahead|2"
-    mock_async_callback "prompt_purity_enhanced_git_worker" 0 "$test_output"
-    
-    # Verify callback was processed
-    assert $? equals 0
+	prompt_purity_enhanced_vcs_info=()
+
+	prompt_purity_enhanced_async_callback \
+		"prompt_purity_enhanced_async_git" \
+		0 \
+		$'branch:main\naction:merge\nworktree:feature-worktree\nstatus:modified:1 added:2' \
+		"0.001"
+
+	assert "${prompt_purity_enhanced_vcs_info[branch]}" equals "main"
+	assert "${prompt_purity_enhanced_vcs_info[action]}" equals "merge"
+	assert "${prompt_purity_enhanced_vcs_info[worktree]}" equals "feature-worktree"
+	assert "${prompt_purity_enhanced_vcs_info[status]}" contains "modified:1"
 }
 
 @test 'Async callback handles context worker response' {
-    # Setup mock async environment
-    mock_async_setup
-    
-    # Test context worker response handling
-    local test_output="docker|2 containers|k8s|production"
-    mock_async_callback "prompt_purity_enhanced_context_worker" 0 "$test_output"
-    
-    # Verify callback was processed
-    assert $? equals 0
+	prompt_purity_enhanced_context_info=()
+
+	prompt_purity_enhanced_async_callback \
+		"prompt_purity_enhanced_async_context" \
+		0 \
+		$'docker:docker:running=2 stopped=1\nk8s:k8s:context=production' \
+		"0.001"
+
+	assert "${prompt_purity_enhanced_context_info[docker]}" same_as "docker:running=2 stopped=1"
+	assert "${prompt_purity_enhanced_context_info[k8s]}" same_as "k8s:context=production"
 }
 
 @test 'Async callback handles invalid worker response' {
@@ -137,15 +142,12 @@
 # =============================================================================
 
 @test 'All async worker functions exist' {
-    local workers=(
-        "prompt_purity_enhanced_async_git_fetch"
-        "prompt_purity_enhanced_async_git_status"
-        "prompt_purity_enhanced_async_git_commits"
-        "prompt_purity_enhanced_async_git_worktree"
-        "prompt_purity_enhanced_async_git_info"
-        "prompt_purity_enhanced_async_docker_status"
-        "prompt_purity_enhanced_async_k8s_context"
-        "prompt_purity_enhanced_async_language_versions"
+	local workers=(
+		"prompt_purity_enhanced_async_git"
+		"prompt_purity_enhanced_async_context"
+		"prompt_purity_enhanced_async_docker_status"
+		"prompt_purity_enhanced_async_k8s_context"
+		"prompt_purity_enhanced_async_language_versions"
         "prompt_purity_enhanced_async_cloud_info"
         "prompt_purity_enhanced_async_infra_info"
     )
@@ -166,18 +168,15 @@
 }
 
 @test 'Async updates are triggered correctly' {
-    # Setup mock async environment
-    mock_async_setup
-    
-    # Initialize async to enable updates
-    prompt_purity_enhanced_async_init=1
-    PURITY_CACHE_ENABLED=1
-    
-    # Trigger async updates and capture exit code
-    run prompt_purity_enhanced_trigger_async_updates
-    
-    # Function should return successfully
-    assert $state equals 0
+	async_start_worker "prompt_purity_enhanced" -u -n
+	async_register_callback "prompt_purity_enhanced" prompt_purity_enhanced_async_callback
+	prompt_purity_enhanced_async_init=1
+	PURITY_CACHE_ENABLED=1
+	
+	prompt_purity_enhanced_trigger_async_updates
+
+	assert $? equals 0
+	assert "$(mock_async_worker_job_status prompt_purity_enhanced prompt_purity_enhanced_async_context)" contains "completed:"
 }
 
 @test 'Async workers handle concurrent execution' {

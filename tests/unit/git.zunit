@@ -156,29 +156,14 @@
 # Async Git Operations Tests
 # =============================================================================
 
-@test 'Async git fetch function exists' {
-    run type prompt_purity_enhanced_async_git_fetch
-    assert $state equals 0
+@test 'Unified async git function exists' {
+	run type prompt_purity_enhanced_async_git
+	assert $state equals 0
 }
 
-@test 'Async git status function exists' {
-    run type prompt_purity_enhanced_async_git_status
-    assert $state equals 0
-}
-
-@test 'Async git commits function exists' {
-    run type prompt_purity_enhanced_async_git_commits
-    assert $state equals 0
-}
-
-@test 'Async git worktree function exists' {
-    run type prompt_purity_enhanced_async_git_worktree
-    assert $state equals 0
-}
-
-@test 'Async git info function exists' {
-    run type prompt_purity_enhanced_async_git_info
-    assert $state equals 0
+@test 'Unified async context function exists' {
+	run type prompt_purity_enhanced_async_context
+	assert $state equals 0
 }
 
 # =============================================================================
@@ -249,6 +234,20 @@
     
     assert "$output" equals "main" || assert "$output" equals "master"
     mock_git_repo_cleanup "$repo"
+}
+
+@test 'Unified async git worker returns structured payload' {
+	local repo=$(mock_git_repo_create)
+	mock_git_repo_dirty "$repo"
+	cd "$repo"
+
+	run prompt_purity_enhanced_async_git
+
+	assert $state equals 0
+	assert "$output" contains "branch:"
+	assert "$output" contains "status:"
+	assert "$output" contains "modified:"
+	mock_git_repo_cleanup "$repo"
 }
 
 @test 'Git commit count calculation works' {

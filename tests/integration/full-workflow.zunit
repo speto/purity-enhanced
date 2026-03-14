@@ -97,7 +97,7 @@
     assert $state equals 0
 }
 
-@test 'Async git status function detects dirty repository' {
+@test 'Unified async git worker detects dirty repository' {
     # Setup git repository with changes
     echo "test content" > README.md
     git add README.md
@@ -107,15 +107,15 @@
     echo "modified" >> README.md
     echo "untracked" > new_file.txt
     
-    # Test the async status function directly (returns serialized data)
-    run prompt_purity_enhanced_async_git_status
-    assert $state equals 0
-    assert "$output" is_not_empty
-    # New format: file counts (modified:N added:N deleted:N)
-    assert "$output" contains "modified:"
+	# Test the unified async git worker directly (returns serialized data)
+	run prompt_purity_enhanced_async_git
+	assert $state equals 0
+	assert "$output" is_not_empty
+	assert "$output" contains "status:"
+	assert "$output" contains "modified:"
 }
 
-@test 'Git worktree detection function works' {
+@test 'Unified async git worker reports worktree metadata' {
     # Setup main repository
     echo "main content" > main.txt
     git add main.txt
@@ -124,17 +124,16 @@
     # Create a worktree
     git worktree add -b feature-branch ../feature-worktree --quiet
     
-    # Test worktree detection from main repo
-    run prompt_purity_enhanced_async_git_worktree
-    assert $state equals 0
-    # Main repo with worktrees should show "worktree:main"
-    assert "$output" contains "worktree:main"
-    
-    # Test from worktree directory
-    cd ../feature-worktree
-    run prompt_purity_enhanced_async_git_worktree
-    assert $state equals 0
-    assert "$output" contains "worktree:feature-worktree"
+	# Test main repo payload
+	run prompt_purity_enhanced_async_git
+	assert $state equals 0
+	assert "$output" contains "branch:"
+	
+	# Test from worktree directory
+	cd ../feature-worktree
+	run prompt_purity_enhanced_async_git
+	assert $state equals 0
+	assert "$output" contains "worktree:feature-worktree"
     
     # Clean up worktree
     cd "$INTEGRATION_TEST_DIR"

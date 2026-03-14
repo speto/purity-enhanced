@@ -105,19 +105,15 @@ typeset -g _purity_show_cloud=1
 # using mafredri/zsh-async for dramatically improved performance.
 # 
 # Key components:
-# 1. Multi-worker async system - Separate workers for different context categories
+# 1. Two-job async system - unified git + unified context workers
 # 2. Intelligent caching - File-based cache with TTL and invalidation
 # 3. Immediate rendering - Prompt renders in <50ms using cached data
 # 4. Background updates - Context indicators update without blocking
 # 5. Graceful degradation - Handles service unavailability gracefully
 #
-# Workers:
-# - prompt_purity_enhanced (git operations)
-# - context_docker (Docker Compose status)
-# - context_k8s (Kubernetes context)
-# - context_languages (Node, Ruby, Python, Go, Rust, Java, PHP versions)
-# - context_cloud (GCP, Azure, AWS services)
-# - context_infra (Terraform, Pulumi)
+# Jobs queued on the shared async worker:
+# - prompt_purity_enhanced_async_git (branch, status, worktree metadata)
+# - prompt_purity_enhanced_async_context (Docker, Kubernetes, runtimes, cloud, infra)
 # ================================================================================================
 
 # ================================================================================================
@@ -158,10 +154,6 @@ typeset -gA prompt_purity_enhanced_context_info      # Context indicators state
 typeset -g prompt_purity_enhanced_async_render_requested  # Flag to trigger prompt re-render
 typeset -gi prompt_purity_enhanced_async_pending=0        # Pending async callbacks for render coalescing
 typeset -g prompt_purity_enhanced_async_init              # Flag to track async worker initialization
-typeset -g prompt_purity_enhanced_git_fetch_pattern       # Future use for fetch patterns
-
-# Worker initialization state
-typeset -gA prompt_purity_enhanced_workers_init      # Track worker initialization status
 
 # ================================================================================================
 # TRANSIENT PROMPT STATE MANAGEMENT
@@ -633,84 +625,44 @@ prompt_purity_enhanced_async_init() {
 	"
 }
 
-# Initialize context-specific async workers
-prompt_purity_enhanced_init_context_workers() {
-	local workers=("context_docker" "context_k8s" "context_languages" "context_cloud" "context_infra")
-	
-	for worker in $workers; do
-		if ! (( ${prompt_purity_enhanced_workers_init[$worker]:-0} )); then
-			async_start_worker "$worker" -u -n
-			async_register_callback "$worker" prompt_purity_enhanced_context_callback
-			prompt_purity_enhanced_workers_init[$worker]=1
-			
-			# Set up worker environment with timeout settings
-			async_worker_eval "$worker" "
-				# Set timeouts for external commands
-				export GIT_TERMINAL_PROMPT=0
-				export CLOUDSDK_CORE_DISABLE_PROMPTS=1
-			"
-		fi
-	done
-}
-
-# Initialize context workers on-demand (called from precmd when needed)
-prompt_purity_enhanced_init_context_workers_lazy() {
-	# Only initialize workers that are enabled and not already running
-	local workers=()
-	
-	# Add enabled workers
-	(( ${PURITY_ASYNC_LANGUAGES:-1} )) && workers+=("context_languages")
-	(( ${PURITY_ASYNC_DOCKER:-1} )) && workers+=("context_docker")  
-	(( ${PURITY_ASYNC_K8S:-1} )) && workers+=("context_k8s")
-	(( ${PURITY_ASYNC_CLOUD:-1} )) && workers+=("context_cloud")
-	(( ${PURITY_ASYNC_INFRA:-1} )) && workers+=("context_infra")
-	
-	for worker in $workers; do
-		if ! (( ${prompt_purity_enhanced_workers_init[$worker]:-0} )); then
-			async_start_worker "$worker" -u -n 2>/dev/null && {
-				async_register_callback "$worker" prompt_purity_enhanced_context_callback 2>/dev/null
-				prompt_purity_enhanced_workers_init[$worker]=1
-				
-				# Set up worker environment with timeout settings
-				async_worker_eval "$worker" "
-					export GIT_TERMINAL_PROMPT=0
-					export CLOUDSDK_CORE_DISABLE_PROMPTS=1
-				" 2>/dev/null || true
-			}
-		fi
-	done
-}
-
-# Async git fetch function
-prompt_purity_enhanced_async_git_fetch() {
+# Async git worker
+prompt_purity_enhanced_async_git() {
 	# Check if we're in a git repository
 	command git rev-parse --is-inside-work-tree &>/dev/null || return 0
 
-	# Disable authentication prompts for non-interactive fetch
-	export GIT_TERMINAL_PROMPT=0
-	export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-"ssh"} -o BatchMode=yes"
+	prompt_purity_enhanced_detect_repo_role
 
-	# Perform git fetch
-	command git -c gc.auto=0 fetch --quiet &>/dev/null
+	local ref branch action git_dir worktree_output="" status_output=""
+	ref=$(command git symbolic-ref HEAD 2>/dev/null) || \
+	ref=$(command git rev-parse --short HEAD 2>/dev/null) || return 0
+	branch="${ref#refs/heads/}"
+	git_dir=$(command git rev-parse --git-dir 2>/dev/null) || return 0
 
-	# Check if there is an upstream configured for this branch
-	local upstream
-	upstream=$(command git rev-parse --abbrev-ref @'{u}' 2>/dev/null) || return
-
-	# Check if there are commits to pull
-	local behind_count
-	behind_count=$(command git rev-list --right-only --count HEAD...@'{u}' 2>/dev/null)
-	
-	# Return the behind count if > 0
-	if (( behind_count > 0 )); then
-		echo "behind:$behind_count"
+	if [[ -f "$git_dir/rebase-merge/interactive" ]]; then
+		action="rebase-i"
+	elif [[ -d "$git_dir/rebase-merge" ]]; then
+		action="rebase-m"
+	elif [[ -d "$git_dir/rebase-apply" ]]; then
+		if [[ -f "$git_dir/rebase-apply/rebasing" ]]; then
+			action="rebase"
+		elif [[ -f "$git_dir/rebase-apply/applying" ]]; then
+			action="am"
+		else
+			action="am/rebase"
+		fi
+	elif [[ -f "$git_dir/MERGE_HEAD" ]]; then
+		action="merge"
+	elif [[ -f "$git_dir/CHERRY_PICK_HEAD" ]]; then
+		action="cherry-pick"
+	elif [[ -f "$git_dir/REVERT_HEAD" ]]; then
+		action="revert"
+	elif [[ -f "$git_dir/BISECT_LOG" ]]; then
+		action="bisect"
 	fi
-}
 
-# Async git status function
-prompt_purity_enhanced_async_git_status() {
-	# Check if we're in a git repository
-	command git rev-parse --is-inside-work-tree &>/dev/null || return 0
+	if [[ "$_purity_repo_role" == "worktree" ]] && [[ -n "$_purity_worktree_name" ]]; then
+		worktree_output="$_purity_worktree_name"
+	fi
 
 	local INDEX STATUS=""
 	local modified_files=0 added_files=0 deleted_files=0 conflict_files=0
@@ -763,88 +715,13 @@ prompt_purity_enhanced_async_git_status() {
 		fi
 	fi
 	
-	# Return the git status summary
-	echo "${STATUS% }"
+	status_output="${STATUS% }"
+
+	print -r -- "branch:$branch"
+	print -r -- "action:$action"
+	print -r -- "worktree:$worktree_output"
+	print -r -- "status:$status_output"
 	return 0
-}
-
-# Async git commits function - gets ahead/behind counts
-prompt_purity_enhanced_async_git_commits() {
-	# Check if we're in a git repository
-	command git rev-parse --is-inside-work-tree &>/dev/null || return 0
-
-	# Check if there is an upstream configured for this branch
-	local upstream
-	upstream=$(command git rev-parse --abbrev-ref @'{u}' 2>/dev/null) || return
-
-	# Get ahead/behind counts using git rev-list --left-right --count
-	local ahead_behind
-	ahead_behind=$(command git rev-list --left-right --count HEAD...@'{u}' 2>/dev/null) || return
-
-	# Parse the counts (format is "ahead behind")
-	local ahead_count behind_count
-	ahead_count=${ahead_behind%% *}
-	behind_count=${ahead_behind##* }
-
-	# Build result string
-	local result=""
-	if (( ahead_count > 0 )); then
-		result="ahead:$ahead_count"
-	fi
-	if (( behind_count > 0 )); then
-		if [[ -n "$result" ]]; then
-			result="$result behind:$behind_count"
-		else
-			result="behind:$behind_count"
-		fi
-	fi
-
-	# Return the commit counts if any
-	[[ -n "$result" ]] && echo "$result"
-}
-
-# Async git worktree function - detects if we're in a worktree
-prompt_purity_enhanced_async_git_worktree() {
-	# Check if worktree display is enabled
-	[[ "${PURITY_SHOW_GIT_WORKTREE:-1}" == "0" ]] && return
-	
-	# Check if we're in a git repository
-	command git rev-parse --is-inside-work-tree &>/dev/null || return 0
-
-	# Fast detection using ccstatusline's simple approach
-	local git_dir
-	git_dir=$(command git rev-parse --git-dir 2>/dev/null) || return
-	
-	# Check if we're in a worktree
-	if [[ "$git_dir" =~ /\.git/worktrees/(.+)$ ]]; then
-		# Extract folder name from path
-		local worktree_folder="${match[1]}"
-		
-		# Optional: Show semantic branch name instead of folder
-		if [[ "${PURITY_WORKTREE_SHOW_BRANCH:-0}" == "1" ]]; then
-			local branch_name
-			branch_name=$(command git branch --show-current 2>/dev/null)
-			if [[ -n "$branch_name" ]]; then
-				# Extract last part of branch
-				branch_name="${branch_name##*/}"
-				echo "worktree:$branch_name"
-			else
-				echo "worktree:$worktree_folder"
-			fi
-		else
-			# Default: Show folder name
-			echo "worktree:$worktree_folder"
-		fi
-	else
-		# We're in main repo - check if worktrees exist
-		local worktree_count
-		worktree_count=$(command git worktree list 2>/dev/null | wc -l)
-		if [[ $worktree_count -gt 1 ]]; then
-			# Show "main" only if there are worktrees
-			echo "worktree:main"
-		fi
-		# No output if no worktrees exist
-	fi
 }
 
 # Detect repository role and extract structured information
@@ -926,44 +803,64 @@ prompt_purity_enhanced_detect_repo_role() {
 	_purity_branch_name=$(command git symbolic-ref --short HEAD 2>/dev/null || command git rev-parse --short HEAD 2>/dev/null)
 }
 
-# Async git info function
-prompt_purity_enhanced_async_git_info() {
-	# Check if we're in a git repository
-	command git rev-parse --is-inside-work-tree &>/dev/null || return 0
+# Unified async context worker
+prompt_purity_enhanced_async_context() {
+	local output=()
+	local context_output=""
+	local cache_key=""
 
-	local ref branch action
-	ref=$(command git symbolic-ref HEAD 2>/dev/null) || \
-	ref=$(command git rev-parse --short HEAD 2>/dev/null) || return 0
-	branch="${ref#refs/heads/}"
-
-	# Get git action if any
-	local git_dir
-	git_dir="$(command git rev-parse --git-dir 2>/dev/null)"
-	action=""
-	if [[ -f "$git_dir/rebase-merge/interactive" ]]; then
-		action="rebase-i"
-	elif [[ -d "$git_dir/rebase-merge" ]]; then
-		action="rebase-m"
-	elif [[ -d "$git_dir/rebase-apply" ]]; then
-		if [[ -f "$git_dir/rebase-apply/rebasing" ]]; then
-			action="rebase"
-		elif [[ -f "$git_dir/rebase-apply/applying" ]]; then
-			action="am"
-		else
-			action="am/rebase"
+	if (( ${PURITY_ASYNC_DOCKER:-1} )); then
+		if prompt_purity_enhanced_should_invalidate_cache "docker"; then
+			cache_key="$(prompt_purity_enhanced_generate_cache_key "docker")"
+			prompt_purity_enhanced_cache_invalidate "$cache_key"
+			prompt_purity_enhanced_cache_invalidate "docker"
 		fi
-	elif [[ -f "$git_dir/MERGE_HEAD" ]]; then
-		action="merge"
-	elif [[ -f "$git_dir/CHERRY_PICK_HEAD" ]]; then
-		action="cherry-pick"
-	elif [[ -f "$git_dir/REVERT_HEAD" ]]; then
-		action="revert"
-	elif [[ -f "$git_dir/BISECT_LOG" ]]; then
-		action="bisect"
+		context_output=$(prompt_purity_enhanced_async_docker_status)
+		[[ -n "$context_output" ]] && output+=("docker:$context_output")
 	fi
 
-	# Return git info
-	echo "branch:$branch action:$action"
+	if (( ${PURITY_ASYNC_K8S:-1} )); then
+		if prompt_purity_enhanced_should_invalidate_cache "k8s"; then
+			cache_key="$(prompt_purity_enhanced_generate_cache_key "k8s")"
+			prompt_purity_enhanced_cache_invalidate "$cache_key"
+			prompt_purity_enhanced_cache_invalidate "k8s"
+		fi
+		context_output=$(prompt_purity_enhanced_async_k8s_context)
+		[[ -n "$context_output" ]] && output+=("k8s:$context_output")
+	fi
+
+	if (( ${PURITY_ASYNC_LANGUAGES:-1} )); then
+		if prompt_purity_enhanced_should_invalidate_cache "languages"; then
+			cache_key="$(prompt_purity_enhanced_generate_cache_key "languages")"
+			prompt_purity_enhanced_cache_invalidate "$cache_key"
+			prompt_purity_enhanced_cache_invalidate "languages"
+		fi
+		context_output=$(prompt_purity_enhanced_async_language_versions)
+		[[ -n "$context_output" ]] && output+=("languages:$context_output")
+	fi
+
+	if (( ${PURITY_ASYNC_CLOUD:-1} )); then
+		if prompt_purity_enhanced_should_invalidate_cache "cloud"; then
+			cache_key="$(prompt_purity_enhanced_generate_cache_key "cloud")"
+			prompt_purity_enhanced_cache_invalidate "$cache_key"
+			prompt_purity_enhanced_cache_invalidate "cloud"
+		fi
+		context_output=$(prompt_purity_enhanced_async_cloud_info)
+		[[ -n "$context_output" ]] && output+=("cloud:$context_output")
+	fi
+
+	if (( ${PURITY_ASYNC_INFRA:-1} )); then
+		if prompt_purity_enhanced_should_invalidate_cache "infra"; then
+			cache_key="$(prompt_purity_enhanced_generate_cache_key "infra")"
+			prompt_purity_enhanced_cache_invalidate "$cache_key"
+			prompt_purity_enhanced_cache_invalidate "infra"
+		fi
+		context_output=$(prompt_purity_enhanced_async_infra_info)
+		[[ -n "$context_output" ]] && output+=("infra:$context_output")
+	fi
+
+	(( ${#output[@]} )) || return 0
+	print -rl -- $output
 }
 
 # ================================================================================================
@@ -1363,6 +1260,7 @@ prompt_purity_enhanced_async_callback() {
 	local job=$1 code=$2 output=$3 exec_time=$4
 	local next_pending_raw=${6:-${5:-0}}
 	local do_render=0
+	local item key value
 
 	if [[ $next_pending_raw == <-> ]]; then
 		prompt_purity_enhanced_async_pending=$next_pending_raw
@@ -1380,182 +1278,99 @@ prompt_purity_enhanced_async_callback() {
 		if prompt_purity_enhanced_async_available; then
 			async_stop_worker "prompt_purity_enhanced" 2>/dev/null || true
 			prompt_purity_enhanced_async_init  # Reinitialize worker
-			# Trigger immediate async refresh if we're in a git repo
-			if command git rev-parse --is-inside-work-tree &>/dev/null; then
-				async_job "prompt_purity_enhanced" prompt_purity_enhanced_async_git_worktree 2>/dev/null || true
-				async_job "prompt_purity_enhanced" prompt_purity_enhanced_async_git_info 2>/dev/null || true
-			fi
+			prompt_purity_enhanced_async_tasks
 		fi
 		return
 	fi
 
 	case $job in
-		prompt_purity_enhanced_async_git_info)
+		prompt_purity_enhanced_async_git)
 			if [[ $code -eq 0 ]]; then
-				# Parse git info output
 				local -A info
-				for item in ${(z)output}; do
-					key=${item%%:*}
-					value=${item#*:}
+				local line
+				for line in ${(f)output}; do
+					key=${line%%:*}
+					value=${line#*:}
 					info[$key]=$value
 				done
-				
-				# Update state if changed
+
 				if [[ ${prompt_purity_enhanced_vcs_info[branch]} != ${info[branch]} ]] || \
-				   [[ ${prompt_purity_enhanced_vcs_info[action]} != ${info[action]} ]]; then
+				   [[ ${prompt_purity_enhanced_vcs_info[action]} != ${info[action]} ]] || \
+				   [[ ${prompt_purity_enhanced_vcs_info[status]} != ${info[status]} ]] || \
+				   [[ ${prompt_purity_enhanced_vcs_info[worktree]} != ${info[worktree]} ]]; then
 					prompt_purity_enhanced_vcs_info[branch]=${info[branch]}
 					prompt_purity_enhanced_vcs_info[action]=${info[action]}
-					do_render=1
-				fi
-			fi
-			;;
-		prompt_purity_enhanced_async_git_status)
-			if [[ $code -eq 0 ]]; then
-				# Parse git status output
-				local -A git_status_map
-				for item in ${(z)output}; do
-					key=${item%%:*}
-					value=${item#*:}
-					git_status_map[$key]=$value
-				done
-				
-				# Update state if changed
-				local current_status="${prompt_purity_enhanced_vcs_info[status]}"
-				if [[ $current_status != $output ]]; then
-					prompt_purity_enhanced_vcs_info[status]=$output
-					do_render=1
-				fi
-			fi
-			;;
-		prompt_purity_enhanced_async_git_worktree)
-			if [[ $code -eq 0 && -n $output ]]; then
-				# Parse git worktree result
-				local -A worktree_info
-				for item in ${(z)output}; do
-					key=${item%%:*}
-					value=${item#*:}
-					worktree_info[$key]=$value
-				done
-				
-				# Update state if worktree info changed
-				if [[ ${prompt_purity_enhanced_vcs_info[worktree]} != ${worktree_info[worktree]} ]]; then
-					prompt_purity_enhanced_vcs_info[worktree]=${worktree_info[worktree]}
+					if [[ -n ${info[status]} ]]; then
+						prompt_purity_enhanced_vcs_info[status]=${info[status]}
+					else
+						unset "prompt_purity_enhanced_vcs_info[status]"
+					fi
+					if [[ -n ${info[worktree]} ]]; then
+						prompt_purity_enhanced_vcs_info[worktree]=${info[worktree]}
+					else
+						unset "prompt_purity_enhanced_vcs_info[worktree]"
+					fi
 					do_render=1
 				fi
 			else
-				# Clear worktree info if not in a worktree or detection failed
-				if [[ -n ${prompt_purity_enhanced_vcs_info[worktree]} ]]; then
+				if [[ -n ${prompt_purity_enhanced_vcs_info[action]} ]] || [[ -n ${prompt_purity_enhanced_vcs_info[status]} ]] || [[ -n ${prompt_purity_enhanced_vcs_info[worktree]} ]]; then
+					unset "prompt_purity_enhanced_vcs_info[action]"
+					unset "prompt_purity_enhanced_vcs_info[status]"
 					unset "prompt_purity_enhanced_vcs_info[worktree]"
 					do_render=1
 				fi
 			fi
 			;;
+		prompt_purity_enhanced_async_context)
+			if [[ $code -eq 0 ]]; then
+				local -A next_context
+				local line
+				for line in ${(f)output}; do
+					key=${line%%:*}
+					value=${line#*:}
+					next_context[$key]=$value
+				done
+
+				local context_key
+				for context_key in docker k8s languages cloud infra; do
+					if [[ ${prompt_purity_enhanced_context_info[$context_key]} != ${next_context[$context_key]} ]]; then
+						if [[ -n ${next_context[$context_key]} ]]; then
+							prompt_purity_enhanced_context_info[$context_key]=${next_context[$context_key]}
+						else
+							unset "prompt_purity_enhanced_context_info[$context_key]"
+						fi
+						do_render=1
+					fi
+				done
+			else
+				local context_key
+				for context_key in docker k8s languages cloud infra; do
+					if [[ -n ${prompt_purity_enhanced_context_info[$context_key]} ]]; then
+						unset "prompt_purity_enhanced_context_info[$context_key]"
+						do_render=1
+					fi
+				done
+			fi
+			if (( do_render || ${prompt_purity_enhanced_async_render_requested:-0} )); then
+				typeset -g prompt_purity_enhanced_context="$(prompt_purity_enhanced_build_context_line)"
+				prompt_purity_enhanced_render
+			fi
+			return
+			;;
+		*)
+			return
+			;;
 	esac
 
-	# Re-render prompt if needed
 	if (( do_render || ${prompt_purity_enhanced_async_render_requested:-0} )); then
 		prompt_purity_enhanced_render
 	fi
 }
 
-# Context workers callback function
+# Compatibility wrapper for older tests/helpers
 prompt_purity_enhanced_context_callback() {
-	local job=$1 code=$2 output=$3 exec_time=$4
-	local next_pending_raw=${6:-${5:-0}}
-	local do_render=0
-
-	if [[ $next_pending_raw == <-> ]]; then
-		prompt_purity_enhanced_async_pending=$next_pending_raw
-	else
-		prompt_purity_enhanced_async_pending=0
-	fi
-
-	# Discard stale async results after directory changes
-	[[ -n "${_purity_async_pwd:-}" && "$PWD" != "$_purity_async_pwd" ]] && return
-	
-	case $job in
-		prompt_purity_enhanced_async_docker_status)
-			if [[ $code -eq 0 ]]; then
-				# Update Docker context if changed
-				if [[ ${prompt_purity_enhanced_context_info[docker]} != $output ]]; then
-					prompt_purity_enhanced_context_info[docker]=$output
-					do_render=1
-				fi
-			else
-				# Clear Docker context on error
-				if [[ -n ${prompt_purity_enhanced_context_info[docker]} ]]; then
-					unset "prompt_purity_enhanced_context_info[docker]"
-					do_render=1
-				fi
-			fi
-			;;
-		prompt_purity_enhanced_async_k8s_context)
-			if [[ $code -eq 0 ]]; then
-				# Update Kubernetes context if changed
-				if [[ ${prompt_purity_enhanced_context_info[k8s]} != $output ]]; then
-					prompt_purity_enhanced_context_info[k8s]=$output
-					do_render=1
-				fi
-			else
-				# Clear K8s context on error
-				if [[ -n ${prompt_purity_enhanced_context_info[k8s]} ]]; then
-					unset "prompt_purity_enhanced_context_info[k8s]"
-					do_render=1
-				fi
-			fi
-			;;
-		prompt_purity_enhanced_async_language_versions)
-			if [[ $code -eq 0 ]]; then
-				# Update language versions if changed
-				if [[ ${prompt_purity_enhanced_context_info[languages]} != $output ]]; then
-					prompt_purity_enhanced_context_info[languages]=$output
-					do_render=1
-				fi
-			else
-				# Clear language versions on error
-				if [[ -n ${prompt_purity_enhanced_context_info[languages]} ]]; then
-					unset "prompt_purity_enhanced_context_info[languages]"
-					do_render=1
-				fi
-			fi
-			;;
-		prompt_purity_enhanced_async_cloud_info)
-			if [[ $code -eq 0 ]]; then
-				# Update cloud info if changed
-				if [[ ${prompt_purity_enhanced_context_info[cloud]} != $output ]]; then
-					prompt_purity_enhanced_context_info[cloud]=$output
-					do_render=1
-				fi
-			else
-				# Clear cloud info on error
-				if [[ -n ${prompt_purity_enhanced_context_info[cloud]} ]]; then
-					unset "prompt_purity_enhanced_context_info[cloud]"
-					do_render=1
-				fi
-			fi
-			;;
-		prompt_purity_enhanced_async_infra_info)
-			if [[ $code -eq 0 ]]; then
-				# Update infra info if changed
-				if [[ ${prompt_purity_enhanced_context_info[infra]} != $output ]]; then
-					prompt_purity_enhanced_context_info[infra]=$output
-					do_render=1
-				fi
-			else
-				# Clear infra info on error
-				if [[ -n ${prompt_purity_enhanced_context_info[infra]} ]]; then
-					unset "prompt_purity_enhanced_context_info[infra]"
-					do_render=1
-				fi
-			fi
-			;;
-	esac
-	
-	# Rebuild context line and re-render prompt if context changed
-	if (( do_render || ${prompt_purity_enhanced_async_render_requested:-0} )); then
-		prompt_purity_enhanced_build_context_line
-		prompt_purity_enhanced_render
-	fi
+	prompt_purity_enhanced_async_callback "$@"
+	return $?
 }
 
 # Unified render function (single authoritative render path)
@@ -1725,7 +1540,8 @@ prompt_purity_enhanced_build_context_line() {
 		}
 	fi
 	
-	# Return the built context line
+	# Store and return the built context line
+	typeset -g prompt_purity_enhanced_context="$context_line"
 	echo "$context_line"
 }
 
@@ -1927,65 +1743,9 @@ prompt_purity_enhanced_trigger_async_updates() {
 	if ! prompt_purity_enhanced_async_available || ! (( ${prompt_purity_enhanced_async_init:-0} )); then
 		return
 	fi
-	
-	# Initialize context workers lazily (only when first needed)
-	prompt_purity_enhanced_init_context_workers_lazy
-	
-	# Sync context workers to current directory (critical: without this,
-	# workers run in their startup directory and file detection fails)
-	local context_workers=("context_docker" "context_k8s" "context_languages" "context_cloud" "context_infra")
-	for worker in $context_workers; do
-		if (( ${prompt_purity_enhanced_workers_init[$worker]:-0} )); then
-			async_worker_eval "$worker" builtin cd -q "$PWD" 2>/dev/null || true
-		fi
-	done
-	
-	# Trigger async context jobs with enhanced cache invalidation checks
-	if (( ${PURITY_ASYNC_DOCKER:-1} )); then
-		# Force update if cache should be invalidated
-		if prompt_purity_enhanced_should_invalidate_cache "docker"; then
-			local cache_key="$(prompt_purity_enhanced_generate_cache_key "docker")"
-			prompt_purity_enhanced_cache_invalidate "$cache_key"
-			prompt_purity_enhanced_cache_invalidate "docker"  # Legacy cleanup
-		fi
-		async_job "context_docker" prompt_purity_enhanced_async_docker_status
-	fi
-	
-	if (( ${PURITY_ASYNC_K8S:-1} )); then
-		if prompt_purity_enhanced_should_invalidate_cache "k8s"; then
-			local cache_key="$(prompt_purity_enhanced_generate_cache_key "k8s")"
-			prompt_purity_enhanced_cache_invalidate "$cache_key"
-			prompt_purity_enhanced_cache_invalidate "k8s"  # Legacy cleanup
-		fi
-		async_job "context_k8s" prompt_purity_enhanced_async_k8s_context
-	fi
-	
-	if (( ${PURITY_ASYNC_LANGUAGES:-1} )); then
-		if prompt_purity_enhanced_should_invalidate_cache "languages"; then
-			local cache_key="$(prompt_purity_enhanced_generate_cache_key "languages")"
-			prompt_purity_enhanced_cache_invalidate "$cache_key"
-			prompt_purity_enhanced_cache_invalidate "languages"  # Legacy cleanup
-		fi
-		async_job "context_languages" prompt_purity_enhanced_async_language_versions
-	fi
-	
-	if (( ${PURITY_ASYNC_CLOUD:-1} )); then
-		if prompt_purity_enhanced_should_invalidate_cache "cloud"; then
-			local cache_key="$(prompt_purity_enhanced_generate_cache_key "cloud")"
-			prompt_purity_enhanced_cache_invalidate "$cache_key"
-			prompt_purity_enhanced_cache_invalidate "cloud"  # Legacy cleanup
-		fi
-		async_job "context_cloud" prompt_purity_enhanced_async_cloud_info
-	fi
-	
-	if (( ${PURITY_ASYNC_INFRA:-1} )); then
-		if prompt_purity_enhanced_should_invalidate_cache "infra"; then
-			local cache_key="$(prompt_purity_enhanced_generate_cache_key "infra")"
-			prompt_purity_enhanced_cache_invalidate "$cache_key"
-			prompt_purity_enhanced_cache_invalidate "infra"  # Legacy cleanup
-		fi
-		async_job "context_infra" prompt_purity_enhanced_async_infra_info
-	fi
+
+	async_worker_eval "prompt_purity_enhanced" builtin cd -q "$PWD" 2>/dev/null || true
+	async_job "prompt_purity_enhanced" prompt_purity_enhanced_async_context 2>/dev/null || true
 	
 	# Always return success - async job failures shouldn't fail the trigger
 	return 0
@@ -2300,13 +2060,10 @@ prompt_purity_enhanced_async_tasks() {
 	
 	# Queue essential git jobs if in git repository
 	if command git rev-parse --is-inside-work-tree &>/dev/null; then
-		async_job "prompt_purity_enhanced" prompt_purity_enhanced_async_git_info 2>/dev/null || true
-		async_job "prompt_purity_enhanced" prompt_purity_enhanced_async_git_worktree 2>/dev/null || true
-		async_job "prompt_purity_enhanced" prompt_purity_enhanced_async_git_status 2>/dev/null || true
+		async_job "prompt_purity_enhanced" prompt_purity_enhanced_async_git 2>/dev/null || true
 	fi
-	
-	# Queue context updates in background
-	prompt_purity_enhanced_trigger_async_updates
+
+	async_job "prompt_purity_enhanced" prompt_purity_enhanced_async_context 2>/dev/null || true
 }
 
 # Immediate git branch display (sync, like Pure)
@@ -2326,12 +2083,6 @@ prompt_purity_enhanced_chpwd() {
 	if prompt_purity_enhanced_async_available; then
 		# Cancel in-flight jobs to avoid stale async updates
 		async_flush_jobs "prompt_purity_enhanced" 2>/dev/null || true
-		local context_workers=("context_docker" "context_k8s" "context_languages" "context_cloud" "context_infra")
-		local worker
-		for worker in $context_workers; do
-			(( ${prompt_purity_enhanced_workers_init[$worker]:-0} )) || continue
-			async_flush_jobs "$worker" 2>/dev/null || true
-		done
 	fi
 
 	# Clear git info immediately so the prompt doesn't flash stale data
@@ -2409,17 +2160,7 @@ prompt_purity_enhanced_setup() {
 	# Cleanup function for all async workers and cache
 	prompt_purity_enhanced_cleanup() {
 		if (( ${prompt_purity_enhanced_async_init:-0} )) && prompt_purity_enhanced_async_available; then
-			# Stop git worker
 			async_stop_worker "prompt_purity_enhanced"
-			
-			# Stop context workers
-			local workers=("context_docker" "context_k8s" "context_languages" "context_cloud" "context_infra")
-			for worker in $workers; do
-				if (( ${prompt_purity_enhanced_workers_init[$worker]:-0} )); then
-					async_stop_worker "$worker"
-					prompt_purity_enhanced_workers_init[$worker]=0
-				fi
-			done
 		fi
 		
 		# Cleanup cache files on exit
