@@ -1,0 +1,96 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1773436334617,
+  "projectRoot": "/Users/chimney/Workspace/speto/purity-enhanced",
+  "techStack": {
+    "languages": [
+      {
+        "name": "C/C++",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "Makefile"
+        ]
+      }
+    ],
+    "frameworks": [],
+    "packageManager": null,
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": "make build",
+    "testCommand": "make test",
+    "lintCommand": null,
+    "devCommand": null,
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "docs",
+      "tests"
+    ],
+    "gitBranches": {
+      "defaultBranch": "master",
+      "branchingStrategy": null
+    }
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "demo": {
+      "path": "demo",
+      "purpose": null,
+      "fileCount": 8,
+      "lastAccessed": 1773436334591,
+      "keyFiles": [
+        "Dockerfile",
+        "README.md",
+        "asciinema-demo.sh",
+        "screenshot.tape",
+        "setup-mock-env.sh"
+      ]
+    },
+    "docs": {
+      "path": "docs",
+      "purpose": "Documentation",
+      "fileCount": 2,
+      "lastAccessed": 1773436334592,
+      "keyFiles": [
+        "testing-zpty-async.md",
+        "todo.md"
+      ]
+    },
+    "tests": {
+      "path": "tests",
+      "purpose": "Test files",
+      "fileCount": 4,
+      "lastAccessed": 1773436334593,
+      "keyFiles": [
+        "run.sh",
+        "setup-local-environment.sh",
+        "theme.zunit",
+        "validate-environment.sh"
+      ]
+    },
+    "tests/helpers": {
+      "path": "tests/helpers",
+      "purpose": "Helper functions",
+      "fileCount": 11,
+      "lastAccessed": 1773436334595,
+      "keyFiles": [
+        "ensure-async.zsh",
+        "interactive-test.zsh",
+        "interactive-wrapper.sh"
+      ]
+    }
+  },
+  "hotPaths": [],
+  "userDirectives": []
+}

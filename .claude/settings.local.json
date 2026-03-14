@@ -1,0 +1,43 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(bindkey)",
+      "Bash(echo:*)",
+      "Bash(test:*)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(grep:*)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:getantidote.github.io)",
+      "WebFetch(domain:antidote.sh)",
+      "Bash(zsh:*)",
+      "Bash(curl:*)",
+      "Bash(source:*)",
+      "Bash(ls:*)",
+      "Bash(prompt_purity_cache_cleanup)",
+      "Bash(mkdir:*)",
+      "Bash(find:*)",
+      "Bash(rm:*)",
+      "Bash(mv:*)",
+      "Bash(chmod:*)",
+      "Bash(true)",
+      "Bash(make test:*)",
+      "Bash(docker run:*)",
+      "Bash(docker build:*)",
+      "Bash(/dev/null)",
+      "WebSearch",
+      "WebFetch(domain:docs.docker.com)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git tag:*)",
+      "Bash(make:*)",
+      "Bash(zmodload:*)",
+      "Read(/Users/chimney/**)",
+      "Read(/Users/chimney/**)",
+      "Bash(git rev-parse:*)",
+      "mcp__context7__resolve-library-id",
+      "Read(//Users/chimney/**)",
+      "Bash(git worktree:*)"
+    ],
+    "deny": []
+  }
+}

@@ -12,27 +12,27 @@ Purity Enhanced is a fork of the original [Purity](https://github.com/therealkla
 
 **Python Data Science Project:**
 ```
-~/ml-model (venv) 🐍 3.11 git:feature/training ✶✩ ❯
+~/ml-model (venv) 🐍 3.11 ⎇ feature/training | 2M +1 ❯
 ```
-Shows: virtual environment, Python 3.11, feature branch with modified files
+Shows: virtual environment, Python 3.11, feature branch with 2 modified and 1 new file
 
 **Full-Stack Web Application:**
 ```
-~/webapp ⬢ 18 🐘 8.2 🐳2/3 git:main ↑1 ✓ ❯
+~/webapp ⬢ 18 🐘 8.2 🐳2/3 ⎇ main ❯
 ```
-Shows: Node.js 18, PHP 8.2, Docker containers (2 running/3 total), 1 unpushed commit
+Shows: Node.js 18, PHP 8.2, Docker containers (2 running/3 total), clean main branch
 
 **DevOps/Infrastructure:**
 ```
-~/infra ☁ aws-prod 🏗️ staging ☸ production git:main ✓ ❯
+~/infra ☁ aws-prod 🏗️ staging ☸ production ⎇ main ❯
 ```
-Shows: AWS prod profile, Terraform staging workspace, Kubernetes production context
+Shows: AWS prod profile, Terraform staging workspace, Kubernetes production context, clean main branch
 
 **Backend Development with Jobs:**
 ```
-~/api [✦2] 🐹 1.21 🐳1/1 git:develop ✓✶ ❯
+~/api [✦2] 🐹 1.21 🐳1/1 ⎇ develop | 1M ❯
 ```
-Shows: 2 background jobs, Go 1.21, Docker running, staged and modified files
+Shows: 2 background jobs, Go 1.21, Docker running, develop branch with 1 modified file
 
 ### Features
 
@@ -56,20 +56,19 @@ Shows: 2 background jobs, Go 1.21, Docker running, staged and modified files
 
 ### Git Status Indicators
 
-The theme displays git information with the following indicators:
+The theme displays git information with a clean, ccstatusline-inspired format:
 
-- `git:branch-name` - Current git branch
-- `↑N` Green - N unpushed commits ahead of remote
-- `↓N` Red - N commits behind remote (available to pull)
-- `✓` Green - Staged changes
-- `✶` Blue - Modified files
-- `✗` Red - Deleted files
-- `➜` Magenta - Renamed files
-- `═` Yellow - Unmerged files
-- `✩` Cyan - Untracked files
-- `⚑` Magenta - Stashed changes
-- `⇣` Cyan - Updates available from remote (legacy indicator)
+- `⎇ branch-name` - Current git branch
+- `𖠰 worktree-name` - Git worktree name (when applicable)
 - `rebase-i`, `merge`, etc. - Current git action in progress
+
+**File Count Display:**
+- `NM` - N modified files
+- `+N` Green - N added (untracked) files
+- `-N` Red - N deleted files
+
+**Optional Line Counts:**
+- `(+42,-10)` - Diff statistics showing added/deleted lines (when `PURITY_GIT_SHOW_LINE_COUNTS=1`)
 
 ### Development Context Indicators
 
@@ -121,39 +120,62 @@ antigen apply
 
 ### [oh-my-zsh](https://github.com/ohmyzsh/ohmyzsh)
 
-Clone the repository:
+First, install the required zsh-async dependency:
+```sh
+git clone https://github.com/mafredri/zsh-async.git ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-async
+```
+
+Then clone the theme repository:
 ```sh
 git clone https://github.com/speto/purity-enhanced.git ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/themes/purity-enhanced
 ```
 
-Then symlink the theme file:
+Symlink the theme file:
 ```sh
 ln -s ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/themes/purity-enhanced/purity-enhanced.zsh ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/themes/purity-enhanced.zsh-theme
 ```
 
-Set `ZSH_THEME="purity-enhanced"` in your `.zshrc`.
+Add `zsh-async` to your plugins list and set the theme in your `.zshrc`:
+```sh
+plugins=(... zsh-async)
+ZSH_THEME="purity-enhanced"
+```
 
 ### [prezto](https://github.com/sorin-ionescu/prezto)
 
-Symlink the theme to Prezto's prompt directory:
+First, install the required zsh-async dependency:
+```sh
+git clone https://github.com/mafredri/zsh-async.git ~/.zprezto/modules/async
+```
+
+Then symlink the theme to Prezto's prompt directory:
 ```sh
 ln -s /path/to/purity-enhanced/purity-enhanced.zsh ~/.zprezto/modules/prompt/functions/prompt_purity_enhanced_setup
 ```
 
-Then set in `~/.zpreztorc`:
+Update your `~/.zpreztorc` to load async and set the theme:
 ```sh
+# Add async to modules list
+zstyle ':prezto:load' pmodule '...' 'async' '...'
+# Set theme
 zstyle ':prezto:module:prompt' theme 'purity_enhanced'
 ```
 
 ### Manual Installation
 
-1. Clone this repository:
+1. Clone the required zsh-async dependency:
+   ```sh
+   git clone https://github.com/mafredri/zsh-async.git
+   ```
+
+2. Clone this repository:
    ```sh
    git clone https://github.com/speto/purity-enhanced.git
    ```
 
-2. Source the theme in your `.zshrc`:
+3. Source both async and the theme in your `.zshrc`:
    ```sh
+   source /path/to/zsh-async/async.zsh
    source /path/to/purity-enhanced/purity-enhanced.zsh
    ```
 
@@ -167,22 +189,16 @@ Maximum execution time before showing runtime. Defaults to `5` seconds.
 PURITY_CMD_MAX_EXEC_TIME=10  # Show execution time for commands longer than 10 seconds
 ```
 
-#### `PURITY_GIT_PULL`
-Enable/disable automatic git fetch checking. Defaults to `1` (enabled).
+#### `PURITY_GIT_SHOW_LINE_COUNTS`
+Show line count statistics (+added,-deleted) in git status. Defaults to `0` (disabled).
 ```sh
-PURITY_GIT_PULL=0  # Disable automatic git fetch
+PURITY_GIT_SHOW_LINE_COUNTS=1  # Show diff statistics like (+42,-10)
 ```
 
-#### `PURE_GIT_UNTRACKED_DIRTY`
-Include untracked files in dirty check. Set to `0` for better performance in large repos.
+#### `PURITY_WORKTREE_SHOW_BRANCH`
+Show branch name in worktree display. Defaults to `1` (enabled).
 ```sh
-PURE_GIT_UNTRACKED_DIRTY=0  # Don't check untracked files (faster for large repos)
-```
-
-#### `PURE_GIT_DELAY_DIRTY_CHECK`
-Time to delay git dirty checking when `git status` is slow. Defaults to `1800` seconds.
-```sh
-PURE_GIT_DELAY_DIRTY_CHECK=60  # Wait 1 minute before checking again
+PURITY_WORKTREE_SHOW_BRANCH=0  # Hide branch name when in a worktree
 ```
 
 ### Context Indicator Toggles
@@ -228,8 +244,9 @@ Available color names and their defaults:
 | `path` | blue | Current directory path |
 | `git:branch` | yellow | Git branch name |
 | `git:action` | yellow | Git action (rebase, merge, etc.) |
-| `git:ahead` | green | Unpushed commits indicator (↑N) |
-| `git:behind` | red | Available updates indicator (↓N) |
+| `git:added` | green | Added file count (+N) |
+| `git:deleted` | red | Deleted file count (-N) |
+| `git:modified` | blue | Modified file indicator |
 | `prompt:success` | green | Prompt symbol when last command succeeded |
 | `prompt:error` | red | Prompt symbol when last command failed |
 | `execution_time` | yellow | Command execution time |
@@ -284,7 +301,6 @@ source /path/to/purity-enhanced/purity-enhanced.zsh
 
 # Performance options
 PURITY_CMD_MAX_EXEC_TIME=3  # Show execution time for commands longer than 3 seconds
-PURITY_GIT_PULL=1           # Enable git pull indicator (default)
 
 # Enable only desired context indicators
 PURITY_SHOW_DOCKER=1        # Show Docker Compose status
@@ -335,15 +351,10 @@ Purity Enhanced has been heavily optimized for speed and responsiveness, with co
 
 #### For Large Repositories
 ```sh
-# Disable untracked file checking for better performance
-PURE_GIT_UNTRACKED_DIRTY=0
-
-# Increase delay for dirty checking in slow repositories
-PURE_GIT_DELAY_DIRTY_CHECK=60  # Wait 1 minute before rechecking
-
 # Disable specific context indicators if not needed
 PURITY_SHOW_DOCKER=0
 PURITY_SHOW_KUBERNETES=0
+PURITY_SHOW_LANGUAGES=0  # Disable all language version detection
 ```
 
 #### Cache Configuration
@@ -357,9 +368,11 @@ PURITY_CACHE_TTL_SLOW=1800     # Infrastructure - 30 minutes
 #### Async Performance
 ```sh
 # Enable/disable async operations
-PURITY_ASYNC_GIT=1         # Git operations (default: enabled)
+PURITY_ASYNC_DOCKER=1      # Docker status (default: enabled)
+PURITY_ASYNC_K8S=1         # Kubernetes context (default: enabled)
 PURITY_ASYNC_LANGUAGES=1   # Language detection (default: enabled)
-PURITY_ASYNC_CONTEXTS=1    # Infrastructure context (default: enabled)
+PURITY_ASYNC_CLOUD=1       # Cloud profiles (AWS, GCP, Azure) (default: enabled)
+PURITY_ASYNC_INFRA=1       # Infrastructure tools (Terraform, Pulumi) (default: enabled)
 ```
 
 ### Performance Tools
@@ -415,10 +428,7 @@ All testing uses Docker to ensure consistent, reproducible results across differ
 | Git dirty state | ✅ | ✅ | ✅ |
 | SSH/container awareness | ✅ | ✅ | ✅ |
 | **Git Features** |
-| Basic git symbols | ✅ 3 symbols | ✅ 4 symbols | ✅ 7 symbols |
-| Git fetch indicator | ✅ | ✅ | ✅ |
-| Unpushed/unpulled commits | ✅ | ❌ | ✅ |
-| Git stash indicator | ✅ | ✅ | ✅ |
+| Git status format | ✅ Symbols | ✅ Symbols | ✅ File counts (ccstatusline-style) |
 | Git action display | ❌ | ❌ | ✅ (rebase, merge, etc.) |
 | Git worktree support | ❌ | ❌ | ✅ |
 | **Development Context** |
@@ -456,8 +466,6 @@ All testing uses Docker to ensure consistent, reproducible results across differ
 - Command execution time display
 - SSH/container context detection
 - Git branch and dirty state
-- Git fetch indicator (⇣)
-- Unpushed/unpulled commit counts (↑N ↓N)
 - Prompt character color change on error
 - Terminal title updates
 - Performance optimizations
@@ -465,7 +473,7 @@ All testing uses Docker to ensure consistent, reproducible results across differ
 
 **✨ Unique to Purity Enhanced:**
 - Git action display (rebase, merge, cherry-pick status)
-- Extended git symbols (7 vs Pure's 3, Purity's 4)
+- File count git status format (ccstatusline-inspired)
 - Git worktree support
 - Multi-language detection (7+ languages)
 - Docker integration (container counts)

@@ -1,0 +1,183 @@
+#!/usr/bin/env zunit
+
+@setup {
+    local test_root
+    if [[ -n "${ZUNIT_TEST_ROOT:-}" ]]; then
+        test_root="$ZUNIT_TEST_ROOT"
+    elif [[ -d "/workspace" ]]; then
+        test_root="/workspace"
+    elif [[ -f "${0:A:h}/../../purity-enhanced.zsh" ]]; then
+        test_root="$(cd "${0:A:h}/../.." && pwd)"
+    else
+        test_root="$(pwd)"
+    fi
+
+    export ZUNIT_TEST_ROOT="$test_root"
+    export THEME_FILE="$test_root/purity-enhanced.zsh"
+    export PURITY_TEST_DIR="$test_root/tests"
+    export PURITY_SUPPRESS_ASYNC_WARNING=1
+
+    cd "$test_root" || return 1
+    setopt extended_glob null_glob prompt_subst
+
+    source "$THEME_FILE" || return 1
+    source "$PURITY_TEST_DIR/helpers/load-helpers.zsh" || return 1
+    mock_async_setup
+}
+
+@teardown {
+    mock_async_cleanup
+}
+
+@test 'Git branch sync renders branch segment in git repo' {
+    local old_pwd="$PWD"
+    local repo
+    repo=$(mock_git_repo_create)
+    cd "$repo" || return 1
+
+    run prompt_purity_enhanced_git_branch_sync
+    assert $state equals 0
+    assert "$output" contains "⎇ "
+    assert "$output" contains "%F{yellow}"
+
+    cd "$old_pwd" || return 1
+    mock_git_repo_cleanup "$repo"
+}
+
+@test 'Git branch sync is empty outside git repo' {
+    local old_pwd="$PWD"
+    local temp_dir
+    temp_dir=$(mktemp -d)
+    cd "$temp_dir" || return 1
+
+    run prompt_purity_enhanced_git_branch_sync
+    assert $state equals 0
+    assert "$output" is_empty
+
+    cd "$old_pwd" || return 1
+    rm -rf "$temp_dir"
+}
+
+@test 'Git info renders worktree segment from sync state' {
+    local old_pwd="$PWD"
+    local repo
+    repo=$(mock_git_repo_create)
+    cd "$repo" || return 1
+
+    typeset -gA prompt_purity_enhanced_vcs_info
+    prompt_purity_enhanced_vcs_info[worktree]="feature-tree"
+    prompt_purity_enhanced_vcs_info[action]=""
+
+    run prompt_purity_git_info
+    assert $state equals 0
+    assert "$output" same_as " %F{242}𖠰 feature-tree%f"
+
+    cd "$old_pwd" || return 1
+    mock_git_repo_cleanup "$repo"
+}
+
+@test 'Git info appends action after worktree segment' {
+    local old_pwd="$PWD"
+    local repo
+    repo=$(mock_git_repo_create)
+    cd "$repo" || return 1
+
+    typeset -gA prompt_purity_enhanced_vcs_info
+    prompt_purity_enhanced_vcs_info[worktree]="feature-tree"
+    prompt_purity_enhanced_vcs_info[action]="rebase-m"
+
+    run prompt_purity_git_info
+    assert $state equals 0
+    assert "$output" same_as " %F{242}𖠰 feature-tree%f | %F{red}rebase-m%f"
+
+    cd "$old_pwd" || return 1
+    mock_git_repo_cleanup "$repo"
+}
+
+@test 'Git status renders modified added deleted counts' {
+    local old_pwd="$PWD"
+    local repo
+    repo=$(mock_git_repo_create)
+    cd "$repo" || return 1
+
+    typeset -gA prompt_purity_enhanced_vcs_info
+    prompt_purity_enhanced_vcs_info[status]="modified:2 added:1 deleted:3"
+    PURITY_GIT_SHOW_LINE_COUNTS=0
+
+    run prompt_purity_git_status
+    assert $state equals 0
+    assert "$output" same_as " | 2M %F{green}+1%f %F{red}-3%f"
+
+    cd "$old_pwd" || return 1
+    mock_git_repo_cleanup "$repo"
+}
+
+@test 'Git status returns empty when all file counts are zero' {
+    local old_pwd="$PWD"
+    local repo
+    repo=$(mock_git_repo_create)
+    cd "$repo" || return 1
+
+    typeset -gA prompt_purity_enhanced_vcs_info
+    prompt_purity_enhanced_vcs_info[status]="modified:0 added:0 deleted:0"
+    PURITY_GIT_SHOW_LINE_COUNTS=0
+
+    run prompt_purity_git_status
+    assert $state equals 0
+    assert "$output" is_empty
+
+    cd "$old_pwd" || return 1
+    mock_git_repo_cleanup "$repo"
+}
+
+@test 'Git status line-count mode renders diff summary' {
+    local old_pwd="$PWD"
+    local repo
+    repo=$(mock_git_repo_create)
+    cd "$repo" || return 1
+
+    typeset -gA prompt_purity_enhanced_vcs_info
+    prompt_purity_enhanced_vcs_info[status]="lines_added:42 lines_deleted:10"
+    PURITY_GIT_SHOW_LINE_COUNTS=1
+
+    run prompt_purity_git_status
+    assert $state equals 0
+    assert "$output" same_as " | (%F{green}+42%f,%F{red}-10%f)"
+
+    cd "$old_pwd" || return 1
+    mock_git_repo_cleanup "$repo"
+}
+
+@test 'Prompt composition includes sync git render segments' {
+    prompt_purity_enhanced_setup
+
+    assert "$PROMPT" contains "\\$(prompt_purity_enhanced_git_branch_sync)"
+    assert "$PROMPT" contains "\\$(prompt_purity_git_info)"
+    assert "$PROMPT" contains "\\$(prompt_purity_git_status)"
+    assert "$PROMPT" contains "❯"
+}
+
+@test 'Non-git directory render helpers return clean output and exit zero' {
+    local old_pwd="$PWD"
+    local temp_dir
+    temp_dir=$(mktemp -d)
+    cd "$temp_dir" || return 1
+
+    run prompt_purity_enhanced_git_branch_sync
+    assert $state equals 0
+    assert "$output" is_empty
+
+    run prompt_purity_git_info
+    assert $state equals 0
+    assert "$output" is_empty
+
+    typeset -gA prompt_purity_enhanced_vcs_info
+    prompt_purity_enhanced_vcs_info[status]="modified:1 added:1 deleted:1"
+
+    run prompt_purity_git_status
+    assert $state equals 0
+    assert "$output" is_empty
+
+    cd "$old_pwd" || return 1
+    rm -rf "$temp_dir"
+}

@@ -54,7 +54,22 @@ prompt_purity_enhanced_cache_debug() {
 	echo "[CACHE] $message" >&2
 }
 
+# ================================================================================================
+# PRESET SYSTEM
+# ================================================================================================
+# Preset determines default values for context display and git styling
+# Values: minimal, balanced (default), detailed
+: ${PURITY_PRESET:=balanced}
+
+# Internal flags set by preset system (can be overridden by explicit PURITY_SHOW_* variables)
+typeset -g _purity_show_worktree_role=1
+typeset -g _purity_git_style="compact"
+typeset -g _purity_show_docker=1
+typeset -g _purity_show_runtimes=1
+typeset -g _purity_show_cloud=1
+
 # Context display options (set to 0 to disable)
+# These override preset defaults when explicitly set
 : ${PURITY_SHOW_DOCKER:=1}
 : ${PURITY_SHOW_KUBERNETES:=1}
 : ${PURITY_SHOW_AWS:=1}
@@ -288,7 +303,7 @@ prompt_purity_enhanced_transient_cache_prompt() {
 	
 	# Cache the current full prompt line for reference - this is used for calculating
 	# how many lines to overwrite in legacy zsh versions
-	local full_prompt="${prompt_purity_enhanced_context:-}%~$(git_prompt_info) $(git_prompt_status) ❯"
+	local full_prompt="${prompt_purity_enhanced_context:-}%~ ❯"
 	typeset -g prompt_purity_enhanced_full_prompt_cache="$full_prompt"
 }
 
@@ -582,13 +597,8 @@ prompt_purity_enhanced_set_cached_context() {
 
 # Check if async is available
 prompt_purity_enhanced_async_available() {
-	# Check if async is loaded and available
+	# Check if async is loaded and available (async should be initialized in setup)
 	(( $+functions[async_start_worker] )) && return 0
-	# Try to load async if not loaded
-	if (( $+functions[async_init] )); then
-		async_init
-		(( $+functions[async_start_worker] )) && return 0
-	fi
 	return 1
 }
 
@@ -673,7 +683,7 @@ prompt_purity_enhanced_init_context_workers_lazy() {
 # Async git fetch function
 prompt_purity_enhanced_async_git_fetch() {
 	# Check if we're in a git repository
-	command git rev-parse --is-inside-work-tree &>/dev/null || return
+	command git rev-parse --is-inside-work-tree &>/dev/null || return 0
 
 	# Disable authentication prompts for non-interactive fetch
 	export GIT_TERMINAL_PROMPT=0
@@ -699,62 +709,70 @@ prompt_purity_enhanced_async_git_fetch() {
 # Async git status function
 prompt_purity_enhanced_async_git_status() {
 	# Check if we're in a git repository
-	command git rev-parse --is-inside-work-tree &>/dev/null || return
+	command git rev-parse --is-inside-work-tree &>/dev/null || return 0
 
 	local INDEX STATUS=""
 	
-	# Check if we should include untracked files
+	# Get file status
 	if [[ "${PURE_GIT_UNTRACKED_DIRTY:-1}" != "0" ]]; then
 		INDEX=$(command git status --porcelain -b 2>/dev/null)
 	else
 		INDEX=$(command git status --porcelain -b --untracked-files=no 2>/dev/null)
 	fi
 
-	# Only check for untracked if enabled
-	if [[ "${PURE_GIT_UNTRACKED_DIRTY:-1}" != "0" ]] && echo "$INDEX" | command grep -E '^\?\? ' &>/dev/null; then
-		STATUS="untracked:1 $STATUS"
+	# Default: Show file counts (GitKraken-style)
+	if [[ "${PURITY_GIT_SHOW_LINE_COUNTS:-0}" == "0" ]]; then
+		# Count files by status
+		local modified_files=0 added_files=0 deleted_files=0
+		
+		# Count modified files (M in any position)
+		modified_files=$(echo "$INDEX" | command grep -c '^.M\|^M.' 2>/dev/null) || modified_files=0
+		# Count added files (A for staged, ?? for untracked)
+		added_files=$(echo "$INDEX" | command grep -c '^A\|^??' 2>/dev/null) || added_files=0
+		# Count deleted files  
+		deleted_files=$(echo "$INDEX" | command grep -c '^D\|^ D' 2>/dev/null) || deleted_files=0
+		
+		# Build status with file counts
+		[[ $modified_files -gt 0 ]] && STATUS="modified:$modified_files $STATUS"
+		[[ $added_files -gt 0 ]] && STATUS="added:$added_files $STATUS"
+		[[ $deleted_files -gt 0 ]] && STATUS="deleted:$deleted_files $STATUS"
+	else
+		# Optional: Show line counts using --shortstat
+		local total_added=0 total_deleted=0
+		local unstaged_stats staged_stats
+		
+		unstaged_stats=$(command git diff --shortstat 2>/dev/null)
+		staged_stats=$(command git diff --cached --shortstat 2>/dev/null)
+		
+		# Parse line counts from shortstat
+		if [[ -n "$unstaged_stats" ]]; then
+			local insertions=$(echo "$unstaged_stats" | grep -o '[0-9]* insertion' | awk '{print $1}')
+			local deletions=$(echo "$unstaged_stats" | grep -o '[0-9]* deletion' | awk '{print $1}')
+			(( total_added += ${insertions:-0} ))
+			(( total_deleted += ${deletions:-0} ))
+		fi
+		
+		if [[ -n "$staged_stats" ]]; then
+			local insertions=$(echo "$staged_stats" | grep -o '[0-9]* insertion' | awk '{print $1}')
+			local deletions=$(echo "$staged_stats" | grep -o '[0-9]* deletion' | awk '{print $1}')
+			(( total_added += ${insertions:-0} ))
+			(( total_deleted += ${deletions:-0} ))
+		fi
+		
+		if (( total_added > 0 || total_deleted > 0 )); then
+			STATUS="lines_added:$total_added lines_deleted:$total_deleted $STATUS"
+		fi
 	fi
-	if echo "$INDEX" | grep '^A  ' &>/dev/null; then
-		STATUS="added:1 $STATUS"
-	elif echo "$INDEX" | grep '^M  ' &>/dev/null; then
-		STATUS="added:1 $STATUS"
-	elif echo "$INDEX" | grep '^MM ' &>/dev/null; then
-		STATUS="added:1 $STATUS"
-	fi
-	if echo "$INDEX" | grep '^ M ' &>/dev/null; then
-		STATUS="modified:1 $STATUS"
-	elif echo "$INDEX" | grep '^AM ' &>/dev/null; then
-		STATUS="modified:1 $STATUS"
-	elif echo "$INDEX" | grep '^MM ' &>/dev/null; then
-		STATUS="modified:1 $STATUS"
-	elif echo "$INDEX" | grep '^ T ' &>/dev/null; then
-		STATUS="modified:1 $STATUS"
-	fi
-	if echo "$INDEX" | grep '^R  ' &>/dev/null; then
-		STATUS="renamed:1 $STATUS"
-	fi
-	if echo "$INDEX" | grep '^ D ' &>/dev/null; then
-		STATUS="deleted:1 $STATUS"
-	elif echo "$INDEX" | grep '^D  ' &>/dev/null; then
-		STATUS="deleted:1 $STATUS"
-	elif echo "$INDEX" | grep '^AD ' &>/dev/null; then
-		STATUS="deleted:1 $STATUS"
-	fi
-	if command git rev-parse --verify refs/stash >/dev/null 2>&1; then
-		STATUS="stashed:1 $STATUS"
-	fi
-	if echo "$INDEX" | grep '^UU ' &>/dev/null; then
-		STATUS="unmerged:1 $STATUS"
-	fi
-
+	
 	# Return the git status summary
 	echo "${STATUS% }"
+	return 0
 }
 
 # Async git commits function - gets ahead/behind counts
 prompt_purity_enhanced_async_git_commits() {
 	# Check if we're in a git repository
-	command git rev-parse --is-inside-work-tree &>/dev/null || return
+	command git rev-parse --is-inside-work-tree &>/dev/null || return 0
 
 	# Check if there is an upstream configured for this branch
 	local upstream
@@ -792,45 +810,127 @@ prompt_purity_enhanced_async_git_worktree() {
 	[[ "${PURITY_SHOW_GIT_WORKTREE:-1}" == "0" ]] && return
 	
 	# Check if we're in a git repository
-	command git rev-parse --is-inside-work-tree &>/dev/null || return
+	command git rev-parse --is-inside-work-tree &>/dev/null || return 0
 
-	# Get the work tree and git common directory
-	local work_tree git_common_dir
-	work_tree=$(command git rev-parse --show-toplevel 2>/dev/null) || return
-	git_common_dir=$(command git rev-parse --git-common-dir 2>/dev/null) || return
+	# Fast detection using ccstatusline's simple approach
+	local git_dir
+	git_dir=$(command git rev-parse --git-dir 2>/dev/null) || return
 	
-	# Convert to absolute paths for comparison
-	work_tree=$(cd "$work_tree" && pwd) 2>/dev/null || return
-	git_common_dir=$(cd "$git_common_dir" && pwd) 2>/dev/null || return
-	
-	# If work_tree/.git is not the same as git_common_dir, we're in a worktree
-	local git_dir="$work_tree/.git"
-	if [[ -d "$git_dir" && "$git_dir" -ef "$git_common_dir" ]]; then
-		# This is the main repository, not a worktree
-		return
-	fi
-	
-	# We're in a worktree - get the worktree name
-	local worktree_name="${work_tree##*/}"
-	
-	# Try to get a better name from git worktree list if available
-	if command -v git &>/dev/null; then
-		local worktree_info
-		worktree_info=$(command git worktree list --porcelain 2>/dev/null | grep -A2 "worktree $work_tree" | grep "branch" | cut -d' ' -f2 2>/dev/null)
-		if [[ -n "$worktree_info" ]]; then
-			# Use branch name if available
-			worktree_name="${worktree_info##*/}"
+	# Check if we're in a worktree
+	if [[ "$git_dir" =~ /\.git/worktrees/(.+)$ ]]; then
+		# Extract folder name from path
+		local worktree_folder="${match[1]}"
+		
+		# Optional: Show semantic branch name instead of folder
+		if [[ "${PURITY_WORKTREE_SHOW_BRANCH:-0}" == "1" ]]; then
+			local branch_name
+			branch_name=$(command git branch --show-current 2>/dev/null)
+			if [[ -n "$branch_name" ]]; then
+				# Extract last part of branch
+				branch_name="${branch_name##*/}"
+				echo "worktree:$branch_name"
+			else
+				echo "worktree:$worktree_folder"
+			fi
+		else
+			# Default: Show folder name
+			echo "worktree:$worktree_folder"
 		fi
+	else
+		# We're in main repo - check if worktrees exist
+		local worktree_count
+		worktree_count=$(command git worktree list 2>/dev/null | wc -l)
+		if [[ $worktree_count -gt 1 ]]; then
+			# Show "main" only if there are worktrees
+			echo "worktree:main"
+		fi
+		# No output if no worktrees exist
 	fi
-	
-	# Return worktree information
-	echo "worktree:$worktree_name"
+}
+
+# Detect repository role and extract structured information
+# Sets global variables:
+#   _purity_repo_role: 'none' | 'main' | 'worktree' | 'bare'
+#   _purity_worktree_name: name of worktree (empty if not in worktree)
+#   _purity_branch_name: current branch name
+#   _purity_show_worktree_name: 0/1 flag after de-duplication
+prompt_purity_enhanced_detect_repo_role() {
+	typeset -g _purity_repo_role="none"
+	typeset -g _purity_worktree_name=""
+	typeset -g _purity_branch_name=""
+	typeset -g _purity_show_worktree_name=0
+
+	# Check if we're in a git repository
+	if ! command git rev-parse --is-inside-work-tree &>/dev/null; then
+		return 0
+	fi
+
+	# Get git directory
+	local git_dir
+	git_dir=$(command git rev-parse --git-dir 2>/dev/null) || return 0
+
+	# Detect repository role
+	# 1. Check if bare repository
+	if [[ "$(command git rev-parse --is-bare-repository 2>/dev/null)" == "true" ]]; then
+		_purity_repo_role="bare"
+		# Get branch name for bare repo
+		_purity_branch_name=$(command git symbolic-ref --short HEAD 2>/dev/null || command git rev-parse --short HEAD 2>/dev/null)
+		return 0
+	fi
+
+	# 2. Check if we're in a worktree
+	if [[ "$git_dir" =~ /\.git/worktrees/(.+)$ ]]; then
+		_purity_repo_role="worktree"
+		# Extract worktree name from path (everything after /worktrees/)
+		_purity_worktree_name="${match[1]}"
+		# Get branch name
+		_purity_branch_name=$(command git symbolic-ref --short HEAD 2>/dev/null || command git rev-parse --short HEAD 2>/dev/null)
+		
+		# De-duplication logic
+		local cwd_basename="${PWD##*/}"
+		local branch_leaf="${_purity_branch_name##*/}"
+		
+		# Rule 1: If cwd_basename equals worktree_name, don't show worktree name
+		if [[ "$cwd_basename" == "$_purity_worktree_name" ]]; then
+			_purity_show_worktree_name=0
+			return 0
+		fi
+		
+		# Rule 2: If branch_leaf equals worktree_name, don't show worktree name
+		if [[ "$branch_leaf" == "$_purity_worktree_name" ]]; then
+			_purity_show_worktree_name=0
+			return 0
+		fi
+		
+		# Otherwise, show the worktree name
+		_purity_show_worktree_name=1
+		return 0
+	fi
+
+	# 3. Check if main repo with worktrees
+	if [[ "$git_dir" == ".git" ]] || [[ "$git_dir" == *"/.git" ]]; then
+		# Check if this repo has worktrees
+		local worktree_count
+		worktree_count=$(command git worktree list 2>/dev/null | wc -l)
+		if [[ $worktree_count -gt 1 ]]; then
+			_purity_repo_role="main"
+		else
+			_purity_repo_role="main"
+		fi
+		# Get branch name
+		_purity_branch_name=$(command git symbolic-ref --short HEAD 2>/dev/null || command git rev-parse --short HEAD 2>/dev/null)
+		return 0
+	fi
+
+	# Default to main
+	_purity_repo_role="main"
+	_purity_branch_name=$(command git symbolic-ref --short HEAD 2>/dev/null || command git rev-parse --short HEAD 2>/dev/null)
 }
 
 # Async git info function
 prompt_purity_enhanced_async_git_info() {
 	# Check if we're in a git repository
-	command git rev-parse --is-inside-work-tree &>/dev/null || return
+	command git rev-parse --is-inside-work-tree &>/dev/null || return 0
 
 	local ref branch action
 	ref=$(command git symbolic-ref HEAD 2>/dev/null) || \
@@ -916,11 +1016,16 @@ prompt_purity_enhanced_async_docker_status() {
 		fi
 	fi
 	
-	# Method 2: Fallback to directory-based detection with shorter timeout
+	# Method 2: Fallback to label-based detection (most reliable)
 	if [[ $total_count -eq 0 ]]; then
+		# Docker Compose sanitizes project names: strips dots, special chars, lowercases
+		# Use com.docker.compose.project label for reliable matching
 		local compose_project="${PWD##*/}"
-		running_count=$(timeout 3 docker ps --format "{{.Names}}" 2>/dev/null | grep -c "^${compose_project}[_-]" 2>/dev/null || echo 0)
-		total_count=$(timeout 3 docker ps -a --format "{{.Names}}" 2>/dev/null | grep -c "^${compose_project}[_-]" 2>/dev/null || echo 0)
+		# Sanitize the same way Docker does: lowercase, remove non-alphanumeric except dash
+		compose_project="${(L)compose_project//[^a-zA-Z0-9-]/}"
+		
+		running_count=$(timeout 3 docker ps -q --filter "label=com.docker.compose.project=${compose_project}" 2>/dev/null | wc -l | tr -d ' ') || running_count=0
+		total_count=$(timeout 3 docker ps -aq --filter "label=com.docker.compose.project=${compose_project}" 2>/dev/null | wc -l | tr -d ' ') || total_count=0
 	fi
 	
 	# Format result
@@ -1259,6 +1364,25 @@ prompt_purity_enhanced_async_callback() {
 	local job=$1 code=$2 output=$3 exec_time=$4
 	local do_render=0
 
+	# Discard stale async results after directory changes
+	[[ -n "${_purity_async_pwd:-}" && "$PWD" != "$_purity_async_pwd" ]] && return
+
+	# Handle worker crashes (like Pure theme does)
+	if (( code == 2 )) || (( code == 3 )) || (( code == 130 )); then
+		# Worker died unexpectedly - reinitialize
+		typeset -g prompt_purity_enhanced_async_init=0
+		if prompt_purity_enhanced_async_available; then
+			async_stop_worker "prompt_purity_enhanced" 2>/dev/null || true
+			prompt_purity_enhanced_async_init  # Reinitialize worker
+			# Trigger immediate async refresh if we're in a git repo
+			if command git rev-parse --is-inside-work-tree &>/dev/null; then
+				async_job "prompt_purity_enhanced" prompt_purity_enhanced_async_git_worktree 2>/dev/null || true
+				async_job "prompt_purity_enhanced" prompt_purity_enhanced_async_git_info 2>/dev/null || true
+			fi
+		fi
+		return
+	fi
+
 	case $job in
 		prompt_purity_enhanced_async_git_info)
 			if [[ $code -eq 0 ]]; then
@@ -1279,32 +1403,6 @@ prompt_purity_enhanced_async_callback() {
 				fi
 			fi
 			;;
-		prompt_purity_enhanced_async_git_commits)
-			if [[ $code -eq 0 && -n $output ]]; then
-				# Parse git commits output
-				local -A commits
-				for item in ${(z)output}; do
-					key=${item%%:*}
-					value=${item#*:}
-					commits[$key]=$value
-				done
-				
-				# Update state if changed
-				if [[ ${prompt_purity_enhanced_vcs_info[ahead]} != ${commits[ahead]} ]] || \
-				   [[ ${prompt_purity_enhanced_vcs_info[behind]} != ${commits[behind]} ]]; then
-					prompt_purity_enhanced_vcs_info[ahead]=${commits[ahead]}
-					prompt_purity_enhanced_vcs_info[behind]=${commits[behind]}
-					do_render=1
-				fi
-			else
-				# Clear commit counts if command failed or no commits
-				if [[ -n ${prompt_purity_enhanced_vcs_info[ahead]} ]] || [[ -n ${prompt_purity_enhanced_vcs_info[behind]} ]]; then
-					unset "prompt_purity_enhanced_vcs_info[ahead]"
-					unset "prompt_purity_enhanced_vcs_info[behind]"
-					do_render=1
-				fi
-			fi
-			;;
 		prompt_purity_enhanced_async_git_status)
 			if [[ $code -eq 0 ]]; then
 				# Parse git status output
@@ -1319,29 +1417,6 @@ prompt_purity_enhanced_async_callback() {
 				local current_status="${prompt_purity_enhanced_vcs_info[status]}"
 				if [[ $current_status != $output ]]; then
 					prompt_purity_enhanced_vcs_info[status]=$output
-					do_render=1
-				fi
-			fi
-			;;
-		prompt_purity_enhanced_async_git_fetch)
-			if [[ $code -eq 0 && -n $output ]]; then
-				# Parse git fetch result
-				local -A fetch_result
-				for item in ${(z)output}; do
-					key=${item%%:*}
-					value=${item#*:}
-					fetch_result[$key]=$value
-				done
-				
-				# Update state if behind count changed
-				if [[ ${prompt_purity_enhanced_vcs_info[behind]} != ${fetch_result[behind]} ]]; then
-					prompt_purity_enhanced_vcs_info[behind]=${fetch_result[behind]}
-					do_render=1
-				fi
-			else
-				# Clear behind count if fetch failed or no commits behind
-				if [[ -n ${prompt_purity_enhanced_vcs_info[behind]} ]]; then
-					unset "prompt_purity_enhanced_vcs_info[behind]"
 					do_render=1
 				fi
 			fi
@@ -1372,13 +1447,33 @@ prompt_purity_enhanced_async_callback() {
 	esac
 
 	# Re-render prompt if needed
-	(( ${prompt_purity_enhanced_async_render_requested:-$do_render} )) && prompt_purity_enhanced_render_preprompt
+	if (( do_render || ${prompt_purity_enhanced_async_render_requested:-0} )); then
+		# Safe ZLE reset following Pure's pattern
+		if [[ -n "$ZLE_VERSION" ]]; then
+			# Skip during completion or rapid input
+			[[ "$CONTEXT" == "cont" ]] && return
+			[[ "$WIDGET" == "expand-or-complete" ]] && return
+			
+			# Safe reset with availability check
+			if zle; then
+				zle reset-prompt
+				# Clear deferred render flag after successful render
+				unset prompt_purity_enhanced_async_render_requested
+			fi
+		else
+			# ZLE not available, defer render to next callback
+			typeset -g prompt_purity_enhanced_async_render_requested=1
+		fi
+	fi
 }
 
 # Context workers callback function
 prompt_purity_enhanced_context_callback() {
 	local job=$1 code=$2 output=$3 exec_time=$4
 	local do_render=0
+
+	# Discard stale async results after directory changes
+	[[ -n "${_purity_async_pwd:-}" && "$PWD" != "$_purity_async_pwd" ]] && return
 	
 	case $job in
 		prompt_purity_enhanced_async_docker_status)
@@ -1458,9 +1553,25 @@ prompt_purity_enhanced_context_callback() {
 			;;
 	esac
 	
-	# Re-render prompt if context changed
-	(( do_render )) && zle reset-prompt
+	# Rebuild context line and re-render prompt if context changed
+	if (( do_render )); then
+		prompt_purity_enhanced_build_context_line
+		prompt_purity_enhanced_reset_prompt
+	fi
 }
+
+# Reset prompt function (like Pure theme's approach)
+prompt_purity_enhanced_reset_prompt() {
+	# Only call zle reset-prompt if ZLE is active (prevents errors during shell init)
+	if [[ -n $ZLE_STATE ]]; then
+		zle && zle .reset-prompt
+	else
+		# If ZLE is not active, set a flag for the next prompt to re-render
+		prompt_purity_enhanced_async_render_requested=1
+	fi
+}
+
+# Immediate async refresh (like Pure's prompt_pure_async_refresh)
 
 # ================================================================================================
 # CONTEXT RENDERING AND MANAGEMENT
@@ -1807,6 +1918,15 @@ prompt_purity_enhanced_trigger_async_updates() {
 	# Initialize context workers lazily (only when first needed)
 	prompt_purity_enhanced_init_context_workers_lazy
 	
+	# Sync context workers to current directory (critical: without this,
+	# workers run in their startup directory and file detection fails)
+	local context_workers=("context_docker" "context_k8s" "context_languages" "context_cloud" "context_infra")
+	for worker in $context_workers; do
+		if (( ${prompt_purity_enhanced_workers_init[$worker]:-0} )); then
+			async_worker_eval "$worker" builtin cd -q "$PWD" 2>/dev/null || true
+		fi
+	done
+	
 	# Trigger async context jobs with enhanced cache invalidation checks
 	if (( ${PURITY_ASYNC_DOCKER:-1} )); then
 		# Force update if cache should be invalidated
@@ -1859,64 +1979,13 @@ prompt_purity_enhanced_trigger_async_updates() {
 }
 
 # Render the preprompt with current async state
+# Prompt content is rendered dynamically via PROMPT substitution functions
+# This function is called by the async callback to signal that data has been updated
 prompt_purity_enhanced_render_preprompt() {
-	# Build git info from async state
-	local git_info=""
-	local git_status_info=""
-	
-	if [[ -n ${prompt_purity_enhanced_vcs_info[branch]} ]]; then
-		local git_branch_color=$(prompt_purity_enhanced_get_color git:branch yellow)
-		git_info=" %F{cyan}git:%f%F{$git_branch_color}${prompt_purity_enhanced_vcs_info[branch]}%f"
-		
-		# Add worktree indicator if present
-		if [[ -n ${prompt_purity_enhanced_vcs_info[worktree]} ]]; then
-			local worktree_color=$(prompt_purity_enhanced_get_color git:worktree green)
-			git_info="$git_info %F{$worktree_color}🌿${prompt_purity_enhanced_vcs_info[worktree]}%f"
-		fi
-		
-		# Add commit count indicators
-		if [[ -n ${prompt_purity_enhanced_vcs_info[ahead]} && ${prompt_purity_enhanced_vcs_info[ahead]} -gt 0 ]] || \
-		   [[ -n ${prompt_purity_enhanced_vcs_info[behind]} && ${prompt_purity_enhanced_vcs_info[behind]} -gt 0 ]]; then
-			local commit_indicators=""
-			if [[ -n ${prompt_purity_enhanced_vcs_info[ahead]} && ${prompt_purity_enhanced_vcs_info[ahead]} -gt 0 ]]; then
-				local ahead_color=$(prompt_purity_enhanced_get_color git:ahead green)
-				commit_indicators="$commit_indicators%F{$ahead_color}↑${prompt_purity_enhanced_vcs_info[ahead]}%f"
-			fi
-			if [[ -n ${prompt_purity_enhanced_vcs_info[behind]} && ${prompt_purity_enhanced_vcs_info[behind]} -gt 0 ]]; then
-				local behind_color=$(prompt_purity_enhanced_get_color git:behind red)
-				commit_indicators="$commit_indicators%F{$behind_color}↓${prompt_purity_enhanced_vcs_info[behind]}%f"
-			fi
-			git_info="$git_info $commit_indicators"
-		fi
-		
-		# Add action if present
-		if [[ -n ${prompt_purity_enhanced_vcs_info[action]} ]]; then
-			local action_color=$(prompt_purity_enhanced_get_color git:action yellow)
-			git_info="$git_info %F{$action_color}${prompt_purity_enhanced_vcs_info[action]}%f"
-		fi
-	fi
-	
-	# Build git status from async state
-	if [[ -n ${prompt_purity_enhanced_vcs_info[status]} ]]; then
-		local -A git_status_map
-		for item in ${(z)${prompt_purity_enhanced_vcs_info[status]}}; do
-			key=${item%%:*}
-			value=${item#*:}
-			git_status_map[$key]=$value
-		done
-		
-		# Convert status to symbols
-		local status_symbols=""
-		[[ -n ${git_status_map[untracked]} ]] && status_symbols+="%F{cyan}✩%f "
-		[[ -n ${git_status_map[added]} ]] && status_symbols+="%F{green}✓%f "
-		[[ -n ${git_status_map[modified]} ]] && status_symbols+="%F{blue}✶%f "
-		[[ -n ${git_status_map[deleted]} ]] && status_symbols+="%F{red}✗%f "
-		[[ -n ${git_status_map[renamed]} ]] && status_symbols+="%F{magenta}➜%f "
-		[[ -n ${git_status_map[unmerged]} ]] && status_symbols+="%F{yellow}═%f "
-		[[ -n ${git_status_map[stashed]} ]] && status_symbols+="%F{magenta}⚑%f "
-		
-		git_status_info=" ${status_symbols% }"
-	fi
+	# No-op: actual rendering is handled by prompt substitution functions
+	# (prompt_purity_enhanced_git_branch_sync, prompt_purity_git_info, prompt_purity_git_status)
+	# The zle reset-prompt is handled by the async callback directly
+	:
 }
 
 # displays the exec time of the last command if set threshold was exceeded
@@ -1953,77 +2022,32 @@ prompt_purity_enhanced_string_length() {
 # ================================================================================================
 
 prompt_purity_enhanced_precmd() {
-	# shows the full path in the title
+	# Always show execution time if present (following Pure's pattern)
+	local exec_time="$(prompt_purity_enhanced_cmd_exec_time)"
+	if [[ -n "$exec_time" ]]; then
+		local exec_time_color=$(prompt_purity_enhanced_get_color execution_time yellow)
+		print -P " %F{$exec_time_color}⌚ $exec_time%f"
+	fi
+	
+	# Always set title (following Pure's pattern)
 	print -Pn '\e]0;%~\a'
-
+	
 	# Background cache cleanup after a few prompts (non-blocking)
 	(( ++prompt_purity_enhanced_precmd_count == 3 )) && {
 		( prompt_purity_enhanced_cache_cleanup 2>/dev/null || true ) &!
 	}
-
-	# Display execution time
-	local exec_time_color=$(prompt_purity_enhanced_get_color execution_time yellow)
-	print -P " %F{$exec_time_color}$(prompt_purity_enhanced_cmd_exec_time)%f"
-
-	# Initialize async workers if not already done (defer until second prompt)
-	if (( prompt_purity_enhanced_precmd_count > 1 )) && prompt_purity_enhanced_async_init; then
-		# Load cached context data for immediate display
-		prompt_purity_enhanced_load_cached_context
-		
-		# Build context line from current async state and cached data
-		local context_line="$(prompt_purity_enhanced_build_context_line)"
-		
-		# Store context line globally for prompt use
-		typeset -g prompt_purity_enhanced_context="$context_line"
-		
-		# Trigger async updates in background (won't block prompt)
-		prompt_purity_enhanced_trigger_async_updates
-		
-		# Handle git operations
-		if command git rev-parse --is-inside-work-tree &>/dev/null; then
-			# Start async git operations
-			async_job "prompt_purity_enhanced" prompt_purity_enhanced_async_git_info
-			async_job "prompt_purity_enhanced" prompt_purity_enhanced_async_git_status
-			async_job "prompt_purity_enhanced" prompt_purity_enhanced_async_git_commits
-
-			# Start git worktree detection if enabled
-			if (( ${PURITY_SHOW_GIT_WORKTREE:-1} )); then
-				async_job "prompt_purity_enhanced" prompt_purity_enhanced_async_git_worktree
-			fi
-
-			# Start git fetch if enabled
-			if (( ${PURITY_GIT_PULL:-1} )); then
-				async_job "prompt_purity_enhanced" prompt_purity_enhanced_async_git_fetch
-			fi
-		else
-			# Clear git state if not in a git repo
-			if [[ -n ${prompt_purity_enhanced_vcs_info[branch]} ]]; then
-				prompt_purity_enhanced_vcs_info=()
-				prompt_purity_enhanced_render_preprompt
-			fi
-		fi
+	
+	# Initialize async and queue tasks, with sync fallback
+	if prompt_purity_enhanced_async_init; then
+		prompt_purity_enhanced_async_tasks
+		# Build context from current async data + sync-only data (virtualenv, jobs)
+		prompt_purity_enhanced_build_context_line
 	else
-		# Fallback to synchronous operations if async is not available
+		# Fallback to synchronous context when async unavailable
 		prompt_purity_enhanced_fallback_sync_context
-		
-		# Handle git with fallback sync operations
-		if command git rev-parse --is-inside-work-tree &>/dev/null && (( ${PURITY_GIT_PULL:-1} )); then
-			{
-				# check if there is an upstream configured for this branch
-				command git rev-parse --abbrev-ref @'{u}' &>/dev/null &&
-				# check if there is anything to pull
-				command git fetch &>/dev/null &&
-				(( $(command git rev-list --right-only --count HEAD...@'{u}' 2>/dev/null) > 0 )) &&
-				# some crazy ansi magic to inject the symbol into the previous line
-				{
-					local prompt_purity_enhanced_preprompt="%~$(git_prompt_info) $(git_prompt_status)"
-					print -Pn "\e7\e[0G\e[`prompt_purity_enhanced_string_length $prompt_purity_enhanced_preprompt`C%F{cyan}⇣%f\e8"
-				}
-			} &!
-		fi
 	fi
-
-	# Handle transient prompt after command completion (before variables are reset)
+	
+	# Handle transient prompt after command completion
 	prompt_purity_enhanced_transient_precmd
 	
 	# reset value since `preexec` isn't always triggered
@@ -2092,118 +2116,74 @@ prompt_purity_enhanced_git_action() {
 }
 
 # Async-aware git functions that fallback to sync if async isn't available
-git_prompt_info() {
-	# Use async state if available
-	if [[ -n ${prompt_purity_enhanced_vcs_info[branch]} ]]; then
-		local git_branch_color=$(prompt_purity_enhanced_get_color git:branch yellow)
-		local git_info="$ZSH_THEME_GIT_PROMPT_PREFIX%F{$git_branch_color}${prompt_purity_enhanced_vcs_info[branch]}%f$ZSH_THEME_GIT_PROMPT_SUFFIX"
-		
-		# Add worktree indicator if present
-		if [[ -n ${prompt_purity_enhanced_vcs_info[worktree]} ]]; then
-			local worktree_color=$(prompt_purity_enhanced_get_color git:worktree green)
-			git_info="$git_info %F{$worktree_color}🌿${prompt_purity_enhanced_vcs_info[worktree]}%f"
+# Ccstatusline-inspired git info display: 𖠰 worktree | ⎇ branch | (+42,-10)
+prompt_purity_git_info() {
+	# Only show git info if we're in a git repository
+	command git rev-parse --is-inside-work-tree &>/dev/null || return 0
+	
+	local git_info=""
+	
+	# Add worktree indicator (𖠰 worktree)
+	# Use async data if available, otherwise detect synchronously (fast: single git + regex)
+	local worktree_name=${prompt_purity_enhanced_vcs_info[worktree]}
+	if [[ -z $worktree_name ]]; then
+		local git_dir=$(command git rev-parse --git-dir 2>/dev/null)
+		if [[ $git_dir =~ /\.git/worktrees/(.+)$ ]]; then
+			worktree_name=${match[1]}
+		elif [[ -d "$git_dir/worktrees" ]]; then
+			worktree_name="main"
 		fi
-		
-		# Add commit count indicators
-		local commit_indicators=""
-		if [[ -n ${prompt_purity_enhanced_vcs_info[ahead]} && ${prompt_purity_enhanced_vcs_info[ahead]} -gt 0 ]]; then
-			local ahead_color=$(prompt_purity_enhanced_get_color git:ahead green)
-			commit_indicators="$commit_indicators%F{$ahead_color}↑${prompt_purity_enhanced_vcs_info[ahead]}%f"
-		fi
-		if [[ -n ${prompt_purity_enhanced_vcs_info[behind]} && ${prompt_purity_enhanced_vcs_info[behind]} -gt 0 ]]; then
-			local behind_color=$(prompt_purity_enhanced_get_color git:behind red)
-			commit_indicators="$commit_indicators%F{$behind_color}↓${prompt_purity_enhanced_vcs_info[behind]}%f"
-		fi
-		if [[ -n "$commit_indicators" ]]; then
-			git_info="$git_info $commit_indicators"
-		fi
-		
-		# Add action if present
-		if [[ -n ${prompt_purity_enhanced_vcs_info[action]} && ${prompt_purity_enhanced_vcs_info[action]} != "" ]]; then
-			local action_color=$(prompt_purity_enhanced_get_color git:action yellow)
-			git_info="$git_info %F{$action_color}${prompt_purity_enhanced_vcs_info[action]}%f"
-		fi
-		
-		echo "$git_info"
-	elif command git rev-parse --is-inside-work-tree &>/dev/null; then
-		# Fallback to synchronous operation if async isn't ready
-		local ref
-		ref=$(command git symbolic-ref HEAD 2> /dev/null) || \
-		ref=$(command git rev-parse --short HEAD 2> /dev/null) || return 0
-		local branch="${ref#refs/heads/}"
-		local action="$(prompt_purity_enhanced_git_action)"
-		echo "$ZSH_THEME_GIT_PROMPT_PREFIX${branch}$ZSH_THEME_GIT_PROMPT_SUFFIX${action}"
 	fi
+	if [[ -n $worktree_name ]]; then
+		local worktree_color=$(prompt_purity_enhanced_get_color git:worktree 242)
+		git_info=" %F{$worktree_color}𖠰 ${worktree_name}%f"
+	fi
+	
+	# Add action if present (rebase, merge, etc.)
+	if [[ -n ${prompt_purity_enhanced_vcs_info[action]} && ${prompt_purity_enhanced_vcs_info[action]} != "" ]]; then
+		local action_color=$(prompt_purity_enhanced_get_color git:action red)
+		git_info="$git_info | %F{$action_color}${prompt_purity_enhanced_vcs_info[action]}%f"
+	fi
+	
+	echo "$git_info"
 }
 
-git_prompt_status() {
-	# Use async state if available
-	if [[ -n ${prompt_purity_enhanced_vcs_info[status]} ]]; then
-		local -A git_status_map
-		for item in ${(z)${prompt_purity_enhanced_vcs_info[status]}}; do
-			key=${item%%:*}
-			value=${item#*:}
-			git_status_map[$key]=$value
-		done
+prompt_purity_git_status() {
+	# Only show git status if we're in a git repository
+	command git rev-parse --is-inside-work-tree &>/dev/null || return 0
+	
+	# Use async data if available, otherwise skip status (too expensive for sync)
+	[[ -n ${prompt_purity_enhanced_vcs_info[status]} ]] || return
+	
+	local -A git_status_map
+	for item in ${(z)${prompt_purity_enhanced_vcs_info[status]}}; do
+		key=${item%%:*}
+		value=${item#*:}
+		git_status_map[$key]=$value
+	done
+	
+	# Display based on mode
+	if [[ "${PURITY_GIT_SHOW_LINE_COUNTS:-0}" == "0" ]]; then
+		# Default: File counts (GitKraken-style)
+		local modified=${git_status_map[modified]:-0}
+		local added=${git_status_map[added]:-0}
+		local deleted=${git_status_map[deleted]:-0}
 		
-		# Convert status to symbols
-		local status_symbols=""
-		[[ -n ${git_status_map[untracked]} ]] && status_symbols+="$ZSH_THEME_GIT_PROMPT_UNTRACKED"
-		[[ -n ${git_status_map[added]} ]] && status_symbols+="$ZSH_THEME_GIT_PROMPT_ADDED"
-		[[ -n ${git_status_map[modified]} ]] && status_symbols+="$ZSH_THEME_GIT_PROMPT_MODIFIED"
-		[[ -n ${git_status_map[deleted]} ]] && status_symbols+="$ZSH_THEME_GIT_PROMPT_DELETED"
-		[[ -n ${git_status_map[renamed]} ]] && status_symbols+="$ZSH_THEME_GIT_PROMPT_RENAMED"
-		[[ -n ${git_status_map[unmerged]} ]] && status_symbols+="$ZSH_THEME_GIT_PROMPT_UNMERGED"
-		[[ -n ${git_status_map[stashed]} ]] && status_symbols+="$ZSH_THEME_GIT_PROMPT_STASHED"
+		if (( modified + added + deleted > 0 )); then
+			local output=""
+			[[ $modified -gt 0 ]] && output="${modified}M "
+			[[ $added -gt 0 ]] && output="$output%F{green}+${added}%f "
+			[[ $deleted -gt 0 ]] && output="$output%F{red}-${deleted}%f"
+			echo " | ${output% }"
+		fi
+	else
+		# Optional: Line counts
+		local lines_added=${git_status_map[lines_added]:-0}
+		local lines_deleted=${git_status_map[lines_deleted]:-0}
 		
-		echo "$status_symbols"
-	elif command git rev-parse --is-inside-work-tree &>/dev/null; then
-		# Fallback to synchronous operation if async isn't ready
-		local INDEX STATUS=""
-		# Check if we should include untracked files
-		if [[ "${PURE_GIT_UNTRACKED_DIRTY:-1}" != "0" ]]; then
-			INDEX=$(command git status --porcelain -b 2> /dev/null)
-		else
-			INDEX=$(command git status --porcelain -b --untracked-files=no 2> /dev/null)
+		if (( lines_added > 0 || lines_deleted > 0 )); then
+			echo " | (%F{green}+$lines_added%f,%F{red}-$lines_deleted%f)"
 		fi
-		
-		# Only check for untracked if enabled
-		if [[ "${PURE_GIT_UNTRACKED_DIRTY:-1}" != "0" ]] && $(echo "$INDEX" | command grep -E '^\?\? ' &> /dev/null); then
-			STATUS="$ZSH_THEME_GIT_PROMPT_UNTRACKED$STATUS"
-		fi
-		if $(echo "$INDEX" | grep '^A  ' &> /dev/null); then
-			STATUS="$ZSH_THEME_GIT_PROMPT_ADDED$STATUS"
-		elif $(echo "$INDEX" | grep '^M  ' &> /dev/null); then
-			STATUS="$ZSH_THEME_GIT_PROMPT_ADDED$STATUS"
-		elif $(echo "$INDEX" | grep '^MM ' &> /dev/null); then
-			STATUS="$ZSH_THEME_GIT_PROMPT_ADDED$STATUS"
-		fi
-		if $(echo "$INDEX" | grep '^ M ' &> /dev/null); then
-			STATUS="$ZSH_THEME_GIT_PROMPT_MODIFIED$STATUS"
-		elif $(echo "$INDEX" | grep '^AM ' &> /dev/null); then
-			STATUS="$ZSH_THEME_GIT_PROMPT_MODIFIED$STATUS"
-		elif $(echo "$INDEX" | grep '^MM ' &> /dev/null); then
-			STATUS="$ZSH_THEME_GIT_PROMPT_MODIFIED$STATUS"
-		elif $(echo "$INDEX" | grep '^ T ' &> /dev/null); then
-			STATUS="$ZSH_THEME_GIT_PROMPT_MODIFIED$STATUS"
-		fi
-		if $(echo "$INDEX" | grep '^R  ' &> /dev/null); then
-			STATUS="$ZSH_THEME_GIT_PROMPT_RENAMED$STATUS"
-		fi
-		if $(echo "$INDEX" | grep '^ D ' &> /dev/null); then
-			STATUS="$ZSH_THEME_GIT_PROMPT_DELETED$STATUS"
-		elif $(echo "$INDEX" | grep '^D  ' &> /dev/null); then
-			STATUS="$ZSH_THEME_GIT_PROMPT_DELETED$STATUS"
-		elif $(echo "$INDEX" | grep '^AD ' &> /dev/null); then
-			STATUS="$ZSH_THEME_GIT_PROMPT_DELETED$STATUS"
-		fi
-		if $(command git rev-parse --verify refs/stash >/dev/null 2>&1); then
-			STATUS="$ZSH_THEME_GIT_PROMPT_STASHED$STATUS"
-		fi
-		if $(echo "$INDEX" | grep '^UU ' &> /dev/null); then
-			STATUS="$ZSH_THEME_GIT_PROMPT_UNMERGED$STATUS"
-		fi
-		echo $STATUS
 	fi
 }
 
@@ -2215,6 +2195,115 @@ prompt_purity_enhanced_get_color() {
 	zstyle -s :prompt:purity-enhanced:$color_name color color || color=$default_color
 	echo $color
 }
+
+# ================================================================================================
+# PRESET SYSTEM LOADER
+# ================================================================================================
+
+# Load preset configuration and set internal flags
+# Presets: minimal, balanced (default), detailed
+prompt_purity_enhanced_load_preset() {
+	local preset="${PURITY_PRESET:-balanced}"
+	
+	# Initialize defaults based on preset
+	case "$preset" in
+		minimal)
+			# Minimal preset: close to original purity-enhanced experience
+			typeset -g _purity_show_worktree_role=0
+			typeset -g _purity_git_style="dirty"
+			typeset -g _purity_show_docker=0
+			typeset -g _purity_show_runtimes=0
+			typeset -g _purity_show_cloud=0
+			;;
+		detailed)
+			# Detailed preset: enable all contexts
+			typeset -g _purity_show_worktree_role=1
+			typeset -g _purity_git_style="full"
+			typeset -g _purity_show_docker=1
+			typeset -g _purity_show_runtimes=1
+			typeset -g _purity_show_cloud=1
+			;;
+		balanced|*)
+			# Balanced preset (default): essential contexts with worktree awareness
+			typeset -g _purity_show_worktree_role=1
+			typeset -g _purity_git_style="compact"
+			typeset -g _purity_show_docker=1
+			typeset -g _purity_show_runtimes=1
+			typeset -g _purity_show_cloud=1
+			;;
+	esac
+	
+	# Apply explicit PURITY_SHOW_* overrides (these take precedence over preset defaults)
+	# Note: We check if the variable was explicitly set by comparing with the default value
+	# Users can override preset defaults by setting PURITY_SHOW_DOCKER=0, etc.
+	# The : ${VAR:=default} syntax means the variable keeps its explicit value if already set
+}
+
+# ================================================================================================
+# ASYNC TASK MANAGEMENT (Following Pure's Pattern)
+# ================================================================================================
+
+# Queue essential async jobs (following Pure's always-queue approach)
+prompt_purity_enhanced_async_tasks() {
+	# Sync worker directory with current shell (Pure's approach)
+	async_worker_eval "prompt_purity_enhanced" builtin cd -q "$PWD" 2>/dev/null || true
+	typeset -g _purity_async_pwd="$PWD"
+	
+	# Queue essential git jobs if in git repository
+	if command git rev-parse --is-inside-work-tree &>/dev/null; then
+		async_job "prompt_purity_enhanced" prompt_purity_enhanced_async_git_info 2>/dev/null || true
+		async_job "prompt_purity_enhanced" prompt_purity_enhanced_async_git_worktree 2>/dev/null || true
+		async_job "prompt_purity_enhanced" prompt_purity_enhanced_async_git_status 2>/dev/null || true
+	fi
+	
+	# Queue context updates in background
+	prompt_purity_enhanced_trigger_async_updates
+}
+
+# Immediate git branch display (sync, like Pure)
+prompt_purity_enhanced_git_branch_sync() {
+	command git rev-parse --is-inside-work-tree &>/dev/null || return 0
+	local branch
+	branch=$(command git branch --show-current 2>/dev/null) || return
+	[[ -n "$branch" ]] && echo " %F{yellow}⎇ $branch%f"
+}
+
+# ================================================================================================
+# DIRECTORY CHANGE HANDLER
+# ================================================================================================
+
+# Clear stale git state on directory change to avoid showing data from previous repo
+prompt_purity_enhanced_chpwd() {
+	if prompt_purity_enhanced_async_available; then
+		# Cancel in-flight jobs to avoid stale async updates
+		async_flush_jobs "prompt_purity_enhanced" 2>/dev/null || true
+		local context_workers=("context_docker" "context_k8s" "context_languages" "context_cloud" "context_infra")
+		local worker
+		for worker in $context_workers; do
+			(( ${prompt_purity_enhanced_workers_init[$worker]:-0} )) || continue
+			async_flush_jobs "$worker" 2>/dev/null || true
+		done
+	fi
+
+	# Clear git info immediately so the prompt doesn't flash stale data
+	prompt_purity_enhanced_vcs_info=()
+	unset prompt_purity_enhanced_async_render_requested
+}
+
+# ================================================================================================
+# COMPATIBILITY LAYER
+# ================================================================================================
+# Provides compatibility with oh-my-zsh themes by creating aliases if oh-my-zsh functions don't exist
+# This allows the theme to work both standalone and with oh-my-zsh
+
+# If oh-my-zsh git functions don't exist, create compatibility aliases
+if ! (( $+functions[git_prompt_info] )); then
+	function git_prompt_info() { prompt_purity_git_info "$@" }
+fi
+
+if ! (( $+functions[git_prompt_status] )); then
+	function git_prompt_status() { prompt_purity_git_status "$@" }
+fi
 
 prompt_purity_enhanced_setup() {
 	# prevent percentage showing up
@@ -2228,6 +2317,29 @@ prompt_purity_enhanced_setup() {
 	(( ! $+modules[zsh/datetime] )) && zmodload zsh/datetime
 	(( ! $+modules[zsh/zutil] )) && zmodload zsh/zutil  # For zstyle
 	(( ! $+functions[add-zsh-hook] )) && autoload -Uz add-zsh-hook
+
+	# Load preset configuration (sets internal flags based on PURITY_PRESET)
+	prompt_purity_enhanced_load_preset
+
+	# Don't try to load async ourselves - let the plugin manager handle it
+	# But ensure async is initialized if functions are available
+	if (( $+functions[async_start_worker] )); then
+		# Initialize async if not already done
+		if [[ -z "${ASYNC_INIT_DONE:-}" ]]; then
+			async_init 2>/dev/null || true
+		fi
+	fi
+
+	# Check for zsh-async availability and warn if missing
+	if ! (( $+functions[async_start_worker] )) && [[ "${PURITY_SUPPRESS_ASYNC_WARNING:-0}" != "1" ]]; then
+		print -P "%F{yellow}⚠ Purity Enhanced: zsh-async not found%f"
+		print -P "%F{yellow}  Many features will be disabled:%f"
+		print -P "%F{yellow}  - Git worktree detection%f"
+		print -P "%F{yellow}  - Async git operations%f"  
+		print -P "%F{yellow}  - Development context indicators%f"
+		print -P "%F{yellow}  Install: https://github.com/mafredri/zsh-async%f"
+		print -P "%F{242}  Suppress: export PURITY_SUPPRESS_ASYNC_WARNING=1%f"
+	fi
 
 	# Initialize async state
 	prompt_purity_enhanced_vcs_info=()
@@ -2270,6 +2382,9 @@ prompt_purity_enhanced_setup() {
 	# Add cleanup hook
 	add-zsh-hook zshexit prompt_purity_enhanced_cleanup
 
+	# Add directory change hook for comprehensive context refresh
+	add-zsh-hook chpwd prompt_purity_enhanced_chpwd
+
 	# Pre-create cache directory for immediate availability (skip expensive cleanup)
 	if [[ "${PURITY_CACHE_ENABLED:-1}" == "1" && ! -d "$PURITY_CACHE_DIR" ]]; then
 		mkdir -p "$PURITY_CACHE_DIR" 2>/dev/null || true
@@ -2277,7 +2392,7 @@ prompt_purity_enhanced_setup() {
 
 	# Set up default colors (can be overridden via zstyle)
 	local path_color=$(prompt_purity_enhanced_get_color path blue)
-	local git_branch_color=$(prompt_purity_enhanced_get_color git:branch yellow)
+	git_branch_color=$(prompt_purity_enhanced_get_color git:branch yellow)
 	local git_action_color=$(prompt_purity_enhanced_get_color git:action yellow)
 	local git_ahead_color=$(prompt_purity_enhanced_get_color git:ahead green)
 	local git_behind_color=$(prompt_purity_enhanced_get_color git:behind red)
@@ -2306,23 +2421,8 @@ prompt_purity_enhanced_setup() {
 		prompt_purity_enhanced_username="%F{$user_host_color}%n@%m%f "
 	fi
 
-	# Git prompt configuration
-	ZSH_THEME_GIT_PROMPT_PREFIX=" %F{cyan}git:%f%F{$git_branch_color}"
-	ZSH_THEME_GIT_PROMPT_SUFFIX="%f"
-	ZSH_THEME_GIT_PROMPT_DIRTY=""
-	ZSH_THEME_GIT_PROMPT_CLEAN=""
-
-	ZSH_THEME_GIT_PROMPT_ADDED="%F{green}✓%f "
-	ZSH_THEME_GIT_PROMPT_MODIFIED="%F{blue}✶%f "
-	ZSH_THEME_GIT_PROMPT_DELETED="%F{red}✗%f "
-	ZSH_THEME_GIT_PROMPT_RENAMED="%F{magenta}➜%f "
-	ZSH_THEME_GIT_PROMPT_UNMERGED="%F{yellow}═%f "
-	ZSH_THEME_GIT_PROMPT_UNTRACKED="%F{cyan}✩%f "
-	ZSH_THEME_GIT_PROMPT_STASHED="%F{magenta}⚑%f "
-
-	# prompt turns red if the previous command didn't exit with 0
-	# Path first, then context indicators, then git info
-	PROMPT="${prompt_purity_enhanced_username}%F{$path_color}%~ \${prompt_purity_enhanced_context}$(git_prompt_info) $(git_prompt_status) %(?.%F{$prompt_success_color}.%F{$prompt_error_color})❯%f "
+	# Ccstatusline-inspired clean prompt: path [context] ⎇ branch 𖠰 worktree | action | counts ❯
+	PROMPT="${prompt_purity_enhanced_username}%F{$path_color}%~%f \${prompt_purity_enhanced_context}\$(prompt_purity_enhanced_git_branch_sync)\$(prompt_purity_git_info)\$(prompt_purity_git_status) %(?.%F{$prompt_success_color}.%F{$prompt_error_color})❯%f "
 	RPROMPT='%F{red}%(?..⏎)%f'
 }
 

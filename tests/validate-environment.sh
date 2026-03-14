@@ -54,10 +54,50 @@ validate_test_environment() {
         ((warnings++))
     fi
     
+    # Check zpty module availability
+    if ! zmodload -e zsh/zpty 2>/dev/null && ! zmodload zsh/zpty 2>/dev/null; then
+        echo "Error: zpty module not available - interactive tests will fail" >&2
+        ((errors++))
+    else
+        echo "✓ zpty module available"
+    fi
+    
+    # Check ZLE availability (only meaningful in interactive shells)
+    if [[ -o interactive ]] && [[ -o zle ]]; then
+        echo "✓ ZLE (Zsh Line Editor) is active"
+    elif [[ -o interactive ]]; then
+        echo "Warning: ZLE not active in interactive shell" >&2
+        ((warnings++))
+    else
+        echo "Info: Non-interactive shell - ZLE status not applicable"
+    fi
+    
     # Check dependencies
     if [[ ! -f "/usr/share/zsh/site-functions/async.zsh" ]] && [[ -z "$ZSH_ASYNC_LOADED" ]]; then
         echo "Warning: zsh-async not found in standard location" >&2
+        echo "  This may cause async-related tests to fail" >&2
         ((warnings++))
+    else
+        echo "✓ zsh-async found"
+    fi
+    
+    # Test basic zpty functionality if module is available
+    if zmodload -e zsh/zpty; then
+        echo "Testing basic zpty functionality..."
+        local test_session="validation_test_$$"
+        if zpty -b "$test_session" echo "zpty_test" 2>/dev/null; then
+            local zpty_output
+            if zpty -rt "$test_session" zpty_output 1 2>/dev/null; then
+                echo "✓ zpty basic functionality working"
+            else
+                echo "Warning: zpty read operation failed" >&2
+                ((warnings++))
+            fi
+            zpty -d "$test_session" 2>/dev/null
+        else
+            echo "Warning: zpty session creation failed" >&2
+            ((warnings++))
+        fi
     fi
     
     # Summary

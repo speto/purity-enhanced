@@ -22,9 +22,10 @@
     # Change to repo root for consistent execution
     cd "$test_root" || return 1
     
-    # Load theme
+    # Load theme (suppress async warning in test environment)
     if [[ -f "$THEME_FILE" ]]; then
         setopt extended_glob null_glob prompt_subst
+        export PURITY_SUPPRESS_ASYNC_WARNING=1
         source "$THEME_FILE"
     else
         echo "Error: Theme not found at $THEME_FILE" >&2
@@ -39,7 +40,7 @@
         return 1
     fi
     
-    # Setup mocks as needed
+    # Setup mocks for non-interactive integration tests
     mock_async_setup
     
     # Create temporary git repository for integration testing
@@ -52,8 +53,10 @@
 
 @teardown {
     # Cleanup integration test directory
-    cd /
-    rm -rf "$INTEGRATION_TEST_DIR"
+    if [[ -n "$INTEGRATION_TEST_DIR" && -d "$INTEGRATION_TEST_DIR" ]]; then
+        cd /
+        rm -rf "$INTEGRATION_TEST_DIR"
+    fi
     
     # Clean up mocks
     mock_async_cleanup
@@ -94,19 +97,48 @@
     assert $state equals 0
 }
 
-@test 'Async operations with real git repository' {
-    # Setup git repository with remote
-    echo "content" > README.md
+@test 'Async git status function detects dirty repository' {
+    # Setup git repository with changes
+    echo "test content" > README.md
     git add README.md
     git commit -m "Add README" --quiet
     
-    # Test async git operations (if available)
-    if ! prompt_purity_enhanced_async_available; then
-        skip "Async integration testing requires async framework"
-    else
-        # Skip test as async_git_check function not implemented
-        skip "Async git check function not yet implemented"
-    fi
+    # Create some uncommitted changes for git status detection
+    echo "modified" >> README.md
+    echo "untracked" > new_file.txt
+    
+    # Test the async status function directly (returns serialized data)
+    run prompt_purity_enhanced_async_git_status
+    assert $state equals 0
+    assert "$output" is_not_empty
+    # New format: file counts (modified:N added:N deleted:N)
+    assert "$output" contains "modified:"
+}
+
+@test 'Git worktree detection function works' {
+    # Setup main repository
+    echo "main content" > main.txt
+    git add main.txt
+    git commit -m "Add main content" --quiet
+    
+    # Create a worktree
+    git worktree add -b feature-branch ../feature-worktree --quiet
+    
+    # Test worktree detection from main repo
+    run prompt_purity_enhanced_async_git_worktree
+    assert $state equals 0
+    # Main repo with worktrees should show "worktree:main"
+    assert "$output" contains "worktree:main"
+    
+    # Test from worktree directory
+    cd ../feature-worktree
+    run prompt_purity_enhanced_async_git_worktree
+    assert $state equals 0
+    assert "$output" contains "worktree:feature-worktree"
+    
+    # Clean up worktree
+    cd "$INTEGRATION_TEST_DIR"
+    git worktree remove ../feature-worktree --force 2>/dev/null || true
 }
 
 @test 'Context detection integration' {

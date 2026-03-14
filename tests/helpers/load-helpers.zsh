@@ -110,11 +110,35 @@ load_helper() {
     fi
 }
 
-# Load each helper module
-load_helper "mock-git.zsh" || return 1
-load_helper "mock-async.zsh" || return 1
-load_helper "mock-contexts.zsh" || return 1
-load_helper "mock-performance.zsh" || return 1
+# Determine test type and load appropriate helpers
+local test_type="unit"
+if [[ "${ZUNIT_TEST_FILE:-}" == *"/integration/"* ]]; then
+    test_type="integration"
+fi
+
+# Load appropriate helpers based on test type
+if [[ "$test_type" == "unit" ]]; then
+    # Unit tests use mocks for isolation and speed
+    load_helper "mock-git.zsh" || return 1
+    load_helper "mock-async.zsh" || return 1
+    load_helper "mock-contexts.zsh" || return 1
+    load_helper "mock-performance.zsh" || return 1
+else
+    # Integration tests need real async functionality
+    load_helper "ensure-async.zsh" || return 1
+    ensure_real_async || return 1
+    
+    # Load zpty-based interactive testing helpers
+    load_helper "zpty-test-helper.zsh" || {
+        echo "Warning: zpty test helper not available, falling back to interactive-test.zsh" >&2
+        load_helper "interactive-test.zsh" || return 1
+    }
+    
+    # Still load other helpers for non-async functionality
+    load_helper "mock-git.zsh" || return 1
+    load_helper "mock-contexts.zsh" || return 1
+    load_helper "mock-performance.zsh" || return 1
+fi
 
 # Clean up helper functions (they're no longer needed)
 unfunction detect_helpers_dir load_helper 2>/dev/null
@@ -135,6 +159,25 @@ test_setup_with_mocks() {
     mock_benchmark_setup
 }
 
+# Integration test setup function
+test_setup_with_zpty() {
+    # Validate zpty environment for integration tests
+    if (( $+functions[zpty_validate_environment] )); then
+        zpty_validate_environment || {
+            echo "Error: zpty environment validation failed" >&2
+            return 1
+        }
+    fi
+    
+    # Ensure real async is available
+    if (( $+functions[ensure_real_async] )); then
+        ensure_real_async || {
+            echo "Error: Failed to ensure real async availability" >&2
+            return 1
+        }
+    fi
+}
+
 # Global test cleanup function
 test_cleanup_mocks() {
     # Clean up all mocks
@@ -145,6 +188,24 @@ test_cleanup_mocks() {
     # Clean up any temporary git repos
     for repo in /tmp/test-repo-*; do
         [[ -d "$repo" ]] && rm -rf "$repo"
+    done
+}
+
+# Integration test cleanup function
+test_cleanup_zpty() {
+    # Clean up all zpty sessions if function is available
+    if (( $+functions[zpty_cleanup_all_sessions] )); then
+        zpty_cleanup_all_sessions
+    fi
+    
+    # Clean up async workers
+    if (( $+functions[async_stop_worker] )); then
+        async_stop_worker "prompt_purity_enhanced" 2>/dev/null || true
+    fi
+    
+    # Clean up temporary directories
+    for dir in /tmp/zpty_test_*; do
+        [[ -d "$dir" ]] && rm -rf "$dir" 2>/dev/null || true
     done
 }
 

@@ -1,0 +1,407 @@
+#!/usr/bin/env zunit
+# Integration tests for async operations requiring ZLE (Zsh Line Editor)
+#
+# These tests use zpty to create interactive shell environments where
+# ZLE is active and async callbacks can fire properly.
+
+@setup {
+    # Set up test environment with robust path resolution
+    local test_root
+    if [[ -n "${ZUNIT_TEST_ROOT:-}" ]]; then
+        test_root="$ZUNIT_TEST_ROOT"
+    elif [[ -d "/workspace" ]]; then
+        test_root="/workspace"
+    elif [[ -f "${0:A:h}/../../purity-enhanced.zsh" ]]; then
+        test_root="$(cd "${0:A:h}/../.." && pwd)"
+    else
+        test_root="$(pwd)"
+    fi
+    
+    export ZUNIT_TEST_ROOT="$test_root"
+    export THEME_FILE="$test_root/purity-enhanced.zsh"
+    export PURITY_TEST_DIR="$test_root/tests"
+    
+    cd "$test_root" || return 1
+    
+    # Load theme first (suppress async warning in test environment)
+    if [[ -f "$THEME_FILE" ]]; then
+        setopt extended_glob null_glob prompt_subst
+        export PURITY_SUPPRESS_ASYNC_WARNING=1
+        source "$THEME_FILE"
+    else
+        echo "Error: Theme not found" >&2
+        return 1
+    fi
+    
+    # Load test helpers
+    if [[ -f "$PURITY_TEST_DIR/helpers/load-helpers.zsh" ]]; then
+        source "$PURITY_TEST_DIR/helpers/load-helpers.zsh"
+    fi
+    
+    # Try to set up zpty (may not work in non-interactive test runners)
+    # The zpty harness requires a fully interactive ZLE environment
+    # that the zunit test runner cannot provide reliably.
+    export ZPTY_AVAILABLE=0
+    if zmodload zsh/zpty 2>/dev/null && [[ -o interactive ]] && [[ -o zle ]]; then
+        if [[ -f "$PURITY_TEST_DIR/helpers/zpty-test-helper.zsh" ]]; then
+            source "$PURITY_TEST_DIR/helpers/zpty-test-helper.zsh" 2>/dev/null
+            if (( $+functions[zpty_start_session] )); then
+                local probe_session="probe_$$"
+                if zpty_start_session "$probe_session" 2>/dev/null; then
+                    zpty_cleanup_session "$probe_session" 2>/dev/null
+                    export ZPTY_AVAILABLE=1
+                fi
+            fi
+        fi
+    fi
+    
+    export ASYNC_TEST_DIR=$(mktemp -d)
+    export ZPTY_TEST_DEBUG=${ZPTY_TEST_DEBUG:-0}
+}
+
+@teardown {
+    if (( ZPTY_AVAILABLE )) && (( $+functions[zpty_cleanup_all_sessions] )); then
+        zpty_cleanup_all_sessions
+    fi
+    
+    if [[ -n "$ASYNC_TEST_DIR" && -d "$ASYNC_TEST_DIR" ]]; then
+        cd /
+        rm -rf "$ASYNC_TEST_DIR"
+    fi
+}
+
+# =============================================================================
+# ZLE and Interactive Environment Tests
+# =============================================================================
+
+@test 'zpty creates interactive shell with ZLE active' {
+    (( ZPTY_AVAILABLE )) || skip "zpty harness not available in test runner"
+    local session="test_zle_$$"
+    
+    # Start session
+    run zpty_start_session "$session"
+    assert $state equals 0
+    
+    # Verify ZLE is active
+    run zpty_check_zle "$session"
+    assert $state equals 0
+    
+    # Clean up
+    zpty_cleanup_session "$session"
+}
+
+@test 'zsh-async is available in zpty session' {
+    (( ZPTY_AVAILABLE )) || skip "zpty harness not available in test runner"
+    local session="test_async_$$"
+    
+    # Start session
+    run zpty_start_session "$session"
+    assert $state equals 0
+    
+    # Check if async functions are available
+    run zpty_check_async "$session"
+    assert $state equals 0
+    
+    # Clean up
+    zpty_cleanup_session "$session"
+}
+
+@test 'theme loads successfully in interactive environment' {
+    (( ZPTY_AVAILABLE )) || skip "zpty harness not available in test runner"
+    local session="test_theme_$$"
+    
+    # Start session
+    run zpty_start_session "$session"
+    assert $state equals 0
+    
+    # Load theme
+    run zpty_load_theme "$session"
+    assert $state equals 0
+    
+    # Verify theme functions exist
+    zpty_send_command "$session" "type prompt_purity_enhanced_precmd"
+    local output=$(zpty_read_output "$session")
+    assert "$output" contains "function"
+    
+    # Clean up
+    zpty_cleanup_session "$session"
+}
+
+# =============================================================================
+# Async Git Operations Tests  
+# =============================================================================
+
+@test 'async git status detection works with ZLE' {
+    (( ZPTY_AVAILABLE )) || skip "zpty harness not available in test runner"
+    local session="test_git_async_$$"
+    local repo_dir="$ASYNC_TEST_DIR/git_status_test"
+    
+    # Start session and setup
+    run zpty_start_session "$session"
+    assert $state equals 0
+    
+    run zpty_load_theme "$session"
+    assert $state equals 0
+    
+    # Create git repo with changes
+    run zpty_setup_git_repo "$session" "$repo_dir"
+    assert $state equals 0
+    
+    # Create uncommitted changes
+    zpty_execute_and_wait "$session" "echo 'modified content' >> README.md"
+    zpty_execute_and_wait "$session" "echo 'untracked file' > new_file.txt"
+    
+    # Test async operations
+    run zpty_test_async_operations "$session" 3
+    assert $state equals 0
+    
+    # Verify git status information was populated
+    zpty_send_command "$session" "git_prompt_status"
+    local status_output=$(zpty_read_output "$session")
+    assert "$status_output" is_not_empty
+    
+    # Clean up
+    zpty_cleanup_session "$session"
+}
+
+@test 'async git worktree detection with ZLE callbacks' {
+    (( ZPTY_AVAILABLE )) || skip "zpty harness not available in test runner"
+    local session="test_worktree_async_$$"
+    local main_repo="$ASYNC_TEST_DIR/main_repo"
+    local worktree_path="$ASYNC_TEST_DIR/feature_worktree"
+    
+    # Start session and setup
+    run zpty_start_session "$session"
+    assert $state equals 0
+    
+    run zpty_load_theme "$session"
+    assert $state equals 0
+    
+    # Create main repository
+    run zpty_setup_git_repo "$session" "$main_repo"
+    assert $state equals 0
+    
+    # Create worktree
+    zpty_execute_and_wait "$session" "git worktree add -b feature-branch '$worktree_path'"
+    
+    # Change to worktree directory
+    zpty_execute_and_wait "$session" "cd '$worktree_path'"
+    
+    # Trigger async operations and wait for completion
+    run zpty_test_async_operations "$session" 5
+    assert $state equals 0
+    
+    # Check that worktree was detected
+    zpty_send_command "$session" "echo 'WORKTREE_CHECK:' \${prompt_purity_enhanced_vcs_info[worktree]:-NOTFOUND}"
+    local worktree_output=$(zpty_read_output "$session")
+    assert "$worktree_output" contains "feature_worktree"
+    assert "$worktree_output" not_contains "NOTFOUND"
+    
+    # Verify worktree appears in prompt
+    zpty_send_command "$session" "git_prompt_info"
+    local prompt_output=$(zpty_read_output "$session")
+    assert "$prompt_output" contains "🌿feature_worktree"
+    
+    # Clean up
+    zpty_cleanup_session "$session"
+}
+
+@test 'async worker updates when changing directories' {
+    (( ZPTY_AVAILABLE )) || skip "zpty harness not available in test runner"
+    local session="test_dir_change_$$"
+    local repo1="$ASYNC_TEST_DIR/repo1"  
+    local repo2="$ASYNC_TEST_DIR/repo2"
+    
+    # Start session and setup
+    run zpty_start_session "$session"
+    assert $state equals 0
+    
+    run zpty_load_theme "$session"
+    assert $state equals 0
+    
+    # Create two different repositories
+    run zpty_setup_git_repo "$session" "$repo1"
+    assert $state equals 0
+    
+    zpty_execute_and_wait "$session" "cd /"
+    run zpty_setup_git_repo "$session" "$repo2"
+    assert $state equals 0
+    
+    # Make repo2 different (different branch)
+    zpty_execute_and_wait "$session" "git checkout -b development"
+    
+    # Start in repo1
+    zpty_execute_and_wait "$session" "cd '$repo1'"
+    run zpty_test_async_operations "$session" 3
+    assert $state equals 0
+    
+    # Change to repo2 and test async updates
+    zpty_execute_and_wait "$session" "cd '$repo2'"
+    run zpty_test_async_operations "$session" 3
+    assert $state equals 0
+    
+    # Verify we're detecting the correct branch
+    zpty_send_command "$session" "git_prompt_info"
+    local branch_output=$(zpty_read_output "$session")
+    assert "$branch_output" contains "development"
+    
+    # Clean up
+    zpty_cleanup_session "$session"
+}
+
+@test 'multiple async operations queue properly' {
+    (( ZPTY_AVAILABLE )) || skip "zpty harness not available in test runner"
+    local session="test_async_queue_$$"
+    local repo_dir="$ASYNC_TEST_DIR/queue_test"
+    
+    # Start session and setup
+    run zpty_start_session "$session"
+    assert $state equals 0
+    
+    run zpty_load_theme "$session"
+    assert $state equals 0
+    
+    # Create repo with multiple async triggers
+    run zpty_setup_git_repo "$session" "$repo_dir"
+    assert $state equals 0
+    
+    # Create scenarios that trigger multiple async operations
+    zpty_execute_and_wait "$session" "echo 'change 1' >> file1.txt"
+    zpty_execute_and_wait "$session" "echo 'change 2' >> file2.txt"  
+    zpty_execute_and_wait "$session" "git add file1.txt"
+    # Leave file2.txt untracked
+    
+    # Trigger multiple precmd calls rapidly
+    zpty_execute_and_wait "$session" "prompt_purity_enhanced_precmd"
+    zpty_execute_and_wait "$session" "prompt_purity_enhanced_precmd"
+    zpty_execute_and_wait "$session" "prompt_purity_enhanced_precmd"
+    
+    # Wait for all async operations to complete
+    sleep 5
+    
+    # Verify final state includes all information
+    zpty_send_command "$session" "git_prompt_status"
+    local final_output=$(zpty_read_output "$session")
+    
+    # Should show both staged and untracked files
+    assert "$final_output" is_not_empty
+    
+    # Clean up
+    zpty_cleanup_session "$session"
+}
+
+# =============================================================================
+# Error Handling and Recovery Tests
+# =============================================================================
+
+@test 'async operations handle git command failures gracefully' {
+    (( ZPTY_AVAILABLE )) || skip "zpty harness not available in test runner"
+    local session="test_git_errors_$$"
+    local invalid_repo="$ASYNC_TEST_DIR/not_a_git_repo"
+    
+    # Start session and setup
+    run zpty_start_session "$session"
+    assert $state equals 0
+    
+    run zpty_load_theme "$session"
+    assert $state equals 0
+    
+    # Create directory that's not a git repo
+    zpty_execute_and_wait "$session" "mkdir -p '$invalid_repo'"
+    zpty_execute_and_wait "$session" "cd '$invalid_repo'"
+    
+    # Trigger async operations (should handle gracefully)
+    zpty_execute_and_wait "$session" "prompt_purity_enhanced_precmd"
+    
+    # Wait for async operations
+    sleep 3
+    
+    # Should not crash - session should still be responsive
+    zpty_send_command "$session" "echo 'ALIVE'"
+    local response=$(zpty_read_output "$session")
+    assert "$response" contains "ALIVE"
+    
+    # Clean up
+    zpty_cleanup_session "$session"
+}
+
+@test 'async worker recovers from crashes' {
+    (( ZPTY_AVAILABLE )) || skip "zpty harness not available in test runner"
+    local session="test_recovery_$$"
+    local repo_dir="$ASYNC_TEST_DIR/recovery_test"
+    
+    # Start session and setup
+    run zpty_start_session "$session"
+    assert $state equals 0
+    
+    run zpty_load_theme "$session"
+    assert $state equals 0
+    
+    # Setup git repo
+    run zpty_setup_git_repo "$session" "$repo_dir"
+    assert $state equals 0
+    
+    # Force async worker to crash by sending invalid job
+    zpty_send_command "$session" "async_worker_eval 'prompt_purity_enhanced' 'exit 1'"
+    
+    # Wait for worker to crash
+    sleep 2
+    
+    # Trigger precmd which should detect crashed worker and restart
+    zpty_execute_and_wait "$session" "prompt_purity_enhanced_precmd"
+    
+    # Wait for recovery
+    sleep 3
+    
+    # Verify async operations work again
+    run zpty_test_async_operations "$session" 3
+    assert $state equals 0
+    
+    # Clean up
+    zpty_cleanup_session "$session"
+}
+
+# =============================================================================
+# Performance Tests
+# =============================================================================
+
+@test 'async operations complete within reasonable time' {
+    (( ZPTY_AVAILABLE )) || skip "zpty harness not available in test runner"
+    local session="test_performance_$$"
+    local repo_dir="$ASYNC_TEST_DIR/perf_test"
+    
+    # Start session and setup
+    run zpty_start_session "$session"
+    assert $state equals 0
+    
+    run zpty_load_theme "$session"
+    assert $state equals 0
+    
+    # Create repo with moderate complexity
+    run zpty_setup_git_repo "$session" "$repo_dir"
+    assert $state equals 0
+    
+    # Add some files to make it realistic
+    for i in {1..10}; do
+        zpty_execute_and_wait "$session" "echo 'file $i content' > file$i.txt"
+    done
+    zpty_execute_and_wait "$session" "git add file*.txt"
+    zpty_execute_and_wait "$session" "git commit -m 'Add test files' --quiet"
+    
+    # Create some changes
+    zpty_execute_and_wait "$session" "echo 'modified' >> file1.txt"
+    zpty_execute_and_wait "$session" "echo 'new file' > new.txt"
+    
+    # Time async operations (should complete in under 2 seconds)
+    local start_time=$EPOCHSECONDS
+    run zpty_test_async_operations "$session" 2
+    local end_time=$EPOCHSECONDS
+    local duration=$((end_time - start_time))
+    
+    # Async operations should complete quickly
+    assert $state equals 0
+    assert $duration -le 3
+    
+    # Clean up
+    zpty_cleanup_session "$session"
+}
