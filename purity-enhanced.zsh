@@ -156,6 +156,7 @@ typeset -g PURITY_CACHE_DIR="${TMPDIR:-/tmp}/purity-enhanced-cache-$$"
 typeset -gA prompt_purity_enhanced_vcs_info          # Git state
 typeset -gA prompt_purity_enhanced_context_info      # Context indicators state
 typeset -g prompt_purity_enhanced_async_render_requested  # Flag to trigger prompt re-render
+typeset -gi prompt_purity_enhanced_async_pending=0        # Pending async callbacks for render coalescing
 typeset -g prompt_purity_enhanced_async_init              # Flag to track async worker initialization
 typeset -g prompt_purity_enhanced_git_fetch_pattern       # Future use for fetch patterns
 
@@ -712,6 +713,7 @@ prompt_purity_enhanced_async_git_status() {
 	command git rev-parse --is-inside-work-tree &>/dev/null || return 0
 
 	local INDEX STATUS=""
+	local modified_files=0 added_files=0 deleted_files=0 conflict_files=0
 	
 	# Get file status
 	if [[ "${PURE_GIT_UNTRACKED_DIRTY:-1}" != "0" ]]; then
@@ -720,23 +722,20 @@ prompt_purity_enhanced_async_git_status() {
 		INDEX=$(command git status --porcelain -b --untracked-files=no 2>/dev/null)
 	fi
 
-	# Default: Show file counts (GitKraken-style)
-	if [[ "${PURITY_GIT_SHOW_LINE_COUNTS:-0}" == "0" ]]; then
-		# Count files by status
-		local modified_files=0 added_files=0 deleted_files=0
-		
-		# Count modified files (M in any position)
-		modified_files=$(echo "$INDEX" | command grep -c '^.M\|^M.' 2>/dev/null) || modified_files=0
-		# Count added files (A for staged, ?? for untracked)
-		added_files=$(echo "$INDEX" | command grep -c '^A\|^??' 2>/dev/null) || added_files=0
-		# Count deleted files  
-		deleted_files=$(echo "$INDEX" | command grep -c '^D\|^ D' 2>/dev/null) || deleted_files=0
-		
-		# Build status with file counts
-		[[ $modified_files -gt 0 ]] && STATUS="modified:$modified_files $STATUS"
-		[[ $added_files -gt 0 ]] && STATUS="added:$added_files $STATUS"
-		[[ $deleted_files -gt 0 ]] && STATUS="deleted:$deleted_files $STATUS"
-	else
+	# Count files by status
+	modified_files=$(echo "$INDEX" | command grep -c '^.M\|^M.' 2>/dev/null) || modified_files=0
+	added_files=$(echo "$INDEX" | command grep -c '^A\|^??' 2>/dev/null) || added_files=0
+	deleted_files=$(echo "$INDEX" | command grep -c '^D\|^ D' 2>/dev/null) || deleted_files=0
+	# Count conflicts from porcelain status codes (UU, AA, DD, etc.)
+	conflict_files=$(echo "$INDEX" | command grep -c '^UU\|^AA\|^DD\|^AU\|^UA\|^DU\|^UD\|^U.\|^.U' 2>/dev/null) || conflict_files=0
+
+	# Build status with file counts
+	[[ $modified_files -gt 0 ]] && STATUS="modified:$modified_files $STATUS"
+	[[ $added_files -gt 0 ]] && STATUS="added:$added_files $STATUS"
+	[[ $deleted_files -gt 0 ]] && STATUS="deleted:$deleted_files $STATUS"
+	[[ $conflict_files -gt 0 ]] && STATUS="conflicted:$conflict_files $STATUS"
+
+	if [[ "${PURITY_GIT_SHOW_LINE_COUNTS:-0}" == "1" ]]; then
 		# Optional: Show line counts using --shortstat
 		local total_added=0 total_deleted=0
 		local unstaged_stats staged_stats
@@ -1362,7 +1361,14 @@ prompt_purity_enhanced_async_infra_info() {
 # Async callback function
 prompt_purity_enhanced_async_callback() {
 	local job=$1 code=$2 output=$3 exec_time=$4
+	local next_pending_raw=${6:-${5:-0}}
 	local do_render=0
+
+	if [[ $next_pending_raw == <-> ]]; then
+		prompt_purity_enhanced_async_pending=$next_pending_raw
+	else
+		prompt_purity_enhanced_async_pending=0
+	fi
 
 	# Discard stale async results after directory changes
 	[[ -n "${_purity_async_pwd:-}" && "$PWD" != "$_purity_async_pwd" ]] && return
@@ -1448,29 +1454,21 @@ prompt_purity_enhanced_async_callback() {
 
 	# Re-render prompt if needed
 	if (( do_render || ${prompt_purity_enhanced_async_render_requested:-0} )); then
-		# Safe ZLE reset following Pure's pattern
-		if [[ -n "$ZLE_VERSION" ]]; then
-			# Skip during completion or rapid input
-			[[ "$CONTEXT" == "cont" ]] && return
-			[[ "$WIDGET" == "expand-or-complete" ]] && return
-			
-			# Safe reset with availability check
-			if zle; then
-				zle reset-prompt
-				# Clear deferred render flag after successful render
-				unset prompt_purity_enhanced_async_render_requested
-			fi
-		else
-			# ZLE not available, defer render to next callback
-			typeset -g prompt_purity_enhanced_async_render_requested=1
-		fi
+		prompt_purity_enhanced_render
 	fi
 }
 
 # Context workers callback function
 prompt_purity_enhanced_context_callback() {
 	local job=$1 code=$2 output=$3 exec_time=$4
+	local next_pending_raw=${6:-${5:-0}}
 	local do_render=0
+
+	if [[ $next_pending_raw == <-> ]]; then
+		prompt_purity_enhanced_async_pending=$next_pending_raw
+	else
+		prompt_purity_enhanced_async_pending=0
+	fi
 
 	# Discard stale async results after directory changes
 	[[ -n "${_purity_async_pwd:-}" && "$PWD" != "$_purity_async_pwd" ]] && return
@@ -1554,21 +1552,36 @@ prompt_purity_enhanced_context_callback() {
 	esac
 	
 	# Rebuild context line and re-render prompt if context changed
-	if (( do_render )); then
+	if (( do_render || ${prompt_purity_enhanced_async_render_requested:-0} )); then
 		prompt_purity_enhanced_build_context_line
-		prompt_purity_enhanced_reset_prompt
+		prompt_purity_enhanced_render
 	fi
 }
 
-# Reset prompt function (like Pure theme's approach)
-prompt_purity_enhanced_reset_prompt() {
-	# Only call zle reset-prompt if ZLE is active (prevents errors during shell init)
-	if [[ -n $ZLE_STATE ]]; then
-		zle && zle .reset-prompt
-	else
-		# If ZLE is not active, set a flag for the next prompt to re-render
-		prompt_purity_enhanced_async_render_requested=1
+# Unified render function (single authoritative render path)
+prompt_purity_enhanced_render() {
+	# Skip render during completion to avoid prompt corruption
+	[[ $CONTEXT == cont ]] && return
+
+	# Coalesce async callbacks and render only when queue is drained
+	if (( ${prompt_purity_enhanced_async_pending:-0} > 0 )); then
+		typeset -g prompt_purity_enhanced_async_render_requested=1
+		return
 	fi
+
+	# ZLE may be unavailable during shell init or non-interactive contexts
+	if [[ -z "$ZLE_VERSION" ]] || ! zle; then
+		typeset -g prompt_purity_enhanced_async_render_requested=1
+		return
+	fi
+
+	zle .reset-prompt
+	unset prompt_purity_enhanced_async_render_requested
+}
+
+# Compatibility shim; rendering is centralized in prompt_purity_enhanced_render
+prompt_purity_enhanced_render_preprompt() {
+	prompt_purity_enhanced_render
 }
 
 # Immediate async refresh (like Pure's prompt_pure_async_refresh)
@@ -1978,16 +1991,6 @@ prompt_purity_enhanced_trigger_async_updates() {
 	return 0
 }
 
-# Render the preprompt with current async state
-# Prompt content is rendered dynamically via PROMPT substitution functions
-# This function is called by the async callback to signal that data has been updated
-prompt_purity_enhanced_render_preprompt() {
-	# No-op: actual rendering is handled by prompt substitution functions
-	# (prompt_purity_enhanced_git_branch_sync, prompt_purity_git_info, prompt_purity_git_status)
-	# The zle reset-prompt is handled by the async callback directly
-	:
-}
-
 # displays the exec time of the last command if set threshold was exceeded
 prompt_purity_enhanced_cmd_exec_time() {
 	local stop=${EPOCHSECONDS:-0}
@@ -2117,35 +2120,40 @@ prompt_purity_enhanced_git_action() {
 
 # Async-aware git functions that fallback to sync if async isn't available
 # Ccstatusline-inspired git info display: 𖠰 worktree | ⎇ branch | (+42,-10)
-prompt_purity_git_info() {
-	# Only show git info if we're in a git repository
+prompt_purity_enhanced_worktree_segment() {
+	# Only show worktree role/action if we're in a git repository
 	command git rev-parse --is-inside-work-tree &>/dev/null || return 0
-	
-	local git_info=""
-	
-	# Add worktree indicator (𖠰 worktree)
-	# Use async data if available, otherwise detect synchronously (fast: single git + regex)
-	local worktree_name=${prompt_purity_enhanced_vcs_info[worktree]}
-	if [[ -z $worktree_name ]]; then
-		local git_dir=$(command git rev-parse --git-dir 2>/dev/null)
-		if [[ $git_dir =~ /\.git/worktrees/(.+)$ ]]; then
-			worktree_name=${match[1]}
-		elif [[ -d "$git_dir/worktrees" ]]; then
-			worktree_name="main"
+
+	# Minimal preset hides this segment entirely
+	[[ "${_purity_show_worktree_role:-1}" == "0" ]] && return 0
+
+	# Refresh structured repo-role globals from detection logic
+	prompt_purity_enhanced_detect_repo_role
+
+	local segment=""
+	local action="${prompt_purity_enhanced_vcs_info[action]}"
+
+	if [[ "$_purity_repo_role" == "worktree" ]] && [[ "$_purity_show_worktree_name" == "1" ]] && [[ -n "$_purity_worktree_name" ]]; then
+		local worktree_color
+		worktree_color=$(prompt_purity_enhanced_get_color git:worktree 242)
+		segment=" %F{$worktree_color}𖠰 ${_purity_worktree_name}%f"
+	fi
+
+	if [[ -n "$action" ]]; then
+		local action_color
+		action_color=$(prompt_purity_enhanced_get_color git:action red)
+		if [[ -n "$segment" ]]; then
+			segment+=" | %F{$action_color}${action}%f"
+		else
+			segment=" | %F{$action_color}${action}%f"
 		fi
 	fi
-	if [[ -n $worktree_name ]]; then
-		local worktree_color=$(prompt_purity_enhanced_get_color git:worktree 242)
-		git_info=" %F{$worktree_color}𖠰 ${worktree_name}%f"
-	fi
-	
-	# Add action if present (rebase, merge, etc.)
-	if [[ -n ${prompt_purity_enhanced_vcs_info[action]} && ${prompt_purity_enhanced_vcs_info[action]} != "" ]]; then
-		local action_color=$(prompt_purity_enhanced_get_color git:action red)
-		git_info="$git_info | %F{$action_color}${prompt_purity_enhanced_vcs_info[action]}%f"
-	fi
-	
-	echo "$git_info"
+
+	echo "$segment"
+}
+
+prompt_purity_git_info() {
+	prompt_purity_enhanced_worktree_segment
 }
 
 prompt_purity_git_status() {
@@ -2156,35 +2164,76 @@ prompt_purity_git_status() {
 	[[ -n ${prompt_purity_enhanced_vcs_info[status]} ]] || return
 	
 	local -A git_status_map
+	local key value
 	for item in ${(z)${prompt_purity_enhanced_vcs_info[status]}}; do
 		key=${item%%:*}
 		value=${item#*:}
 		git_status_map[$key]=$value
 	done
-	
-	# Display based on mode
-	if [[ "${PURITY_GIT_SHOW_LINE_COUNTS:-0}" == "0" ]]; then
-		# Default: File counts (GitKraken-style)
-		local modified=${git_status_map[modified]:-0}
-		local added=${git_status_map[added]:-0}
-		local deleted=${git_status_map[deleted]:-0}
-		
-		if (( modified + added + deleted > 0 )); then
-			local output=""
-			[[ $modified -gt 0 ]] && output="${modified}M "
-			[[ $added -gt 0 ]] && output="$output%F{green}+${added}%f "
-			[[ $deleted -gt 0 ]] && output="$output%F{red}-${deleted}%f"
-			echo " | ${output% }"
+
+	local modified=${git_status_map[modified]:-0}
+	local added=${git_status_map[added]:-0}
+	local deleted=${git_status_map[deleted]:-0}
+	local conflicted=${git_status_map[conflicted]:-0}
+	local lines_added=${git_status_map[lines_added]:-0}
+	local lines_deleted=${git_status_map[lines_deleted]:-0}
+	local git_style="${_purity_git_style:-legacy}"
+
+	# Backward compatibility when preset flag is unset
+	if [[ "$git_style" == "legacy" ]]; then
+		if [[ "${PURITY_GIT_SHOW_LINE_COUNTS:-0}" == "0" ]]; then
+			if (( modified + added + deleted > 0 )); then
+				local legacy_output=""
+				[[ $modified -gt 0 ]] && legacy_output="${modified}M "
+				[[ $added -gt 0 ]] && legacy_output="$legacy_output%F{green}+${added}%f "
+				[[ $deleted -gt 0 ]] && legacy_output="$legacy_output%F{red}-${deleted}%f"
+				echo " | ${legacy_output% }"
+			fi
+		else
+			if (( lines_added > 0 || lines_deleted > 0 )); then
+				echo " | (%F{green}+$lines_added%f,%F{red}-$lines_deleted%f)"
+			fi
 		fi
-	else
-		# Optional: Line counts
-		local lines_added=${git_status_map[lines_added]:-0}
-		local lines_deleted=${git_status_map[lines_deleted]:-0}
-		
-		if (( lines_added > 0 || lines_deleted > 0 )); then
-			echo " | (%F{green}+$lines_added%f,%F{red}-$lines_deleted%f)"
-		fi
+		return
 	fi
+
+	local has_dirty=0
+	if (( modified + added + deleted + conflicted > 0 || lines_added > 0 || lines_deleted > 0 )); then
+		has_dirty=1
+	fi
+
+	case "$git_style" in
+		dirty)
+			(( has_dirty > 0 )) && echo " | *"
+			;;
+		compact)
+			local compact_output=""
+			[[ $modified -gt 0 ]] && compact_output="~${modified} "
+			[[ $added -gt 0 ]] && compact_output="$compact_output%F{green}+${added}%f "
+			[[ $deleted -gt 0 ]] && compact_output="$compact_output%F{red}-${deleted}%f "
+			[[ $conflicted -gt 0 ]] && compact_output="$compact_output%F{red}!${conflicted}%f "
+			[[ -n "$compact_output" ]] && echo " | ${compact_output% }"
+			;;
+		full|*)
+			local full_output=""
+			[[ $modified -gt 0 ]] && full_output="~${modified} "
+			[[ $added -gt 0 ]] && full_output="$full_output%F{green}+${added}%f "
+			[[ $deleted -gt 0 ]] && full_output="$full_output%F{red}-${deleted}%f "
+			[[ $conflicted -gt 0 ]] && full_output="$full_output%F{red}!${conflicted}%f "
+
+			if [[ -n "$full_output" ]]; then
+				local rendered=" | [${full_output% }]"
+				if [[ "${PURITY_GIT_SHOW_LINE_COUNTS:-0}" == "1" ]] && (( lines_added > 0 || lines_deleted > 0 )); then
+					rendered="$rendered (%F{green}+$lines_added%f,%F{red}-$lines_deleted%f)"
+				fi
+				echo "$rendered"
+			elif [[ "${PURITY_GIT_SHOW_LINE_COUNTS:-0}" == "1" ]] && (( lines_added > 0 || lines_deleted > 0 )); then
+				echo " | [(%F{green}+$lines_added%f,%F{red}-$lines_deleted%f)]"
+			fi
+			;;
+	esac
+
+	return 0
 }
 
 # Get a color value from zstyle with fallback
