@@ -389,6 +389,35 @@ PURITY_ASYNC_CLOUD=1       # Cloud profiles (AWS, GCP, Azure) (default: enabled)
 PURITY_ASYNC_INFRA=1       # Infrastructure tools (Terraform, Pulumi) (default: enabled)
 ```
 
+#### gitstatusd Integration
+
+Purity Enhanced supports [gitstatusd](https://github.com/romkatv/gitstatus) for dramatically faster git status (10–50× improvement on large repos).
+
+##### `PURITY_USE_GITSTATUSD`
+Enable or disable gitstatusd integration. Defaults to `1` (enabled).
+```sh
+PURITY_USE_GITSTATUSD=0  # Disable gitstatusd, use zsh-async git subprocesses
+```
+
+##### `PURITY_GITSTATUSD_BIN`
+Path to a custom gitstatusd binary. If not set, the theme searches:
+1. `PURITY_GITSTATUSD_BIN` environment variable
+2. `gitstatusd` on your `$PATH`
+3. `~/.cache/purity-enhanced/gitstatusd`
+
+The theme falls back to zsh-async git if no binary is found.
+```sh
+PURITY_GITSTATUSD_BIN=/usr/local/bin/gitstatusd
+```
+
+##### Installing gitstatusd
+```sh
+# macOS
+brew install gitstatusd
+
+# Or download from https://github.com/romkatv/gitstatus/releases
+```
+
 ### Performance Tools
 
 #### Benchmarking

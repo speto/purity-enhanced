@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **Compose-file gate for Docker context** (`_purity_has_compose`): `docker ps` now only runs in directories containing a Compose project file. Recognises `docker-compose.{yml,yaml}`, `compose.{yml,yaml}`, `*.override.*` variants, **`.devcontainer/docker-compose.yml`** (devcontainer pattern), and **`$COMPOSE_FILE`** env var override (Docker Compose's own mechanism). Walks up to git root or filesystem root. Eliminates docker socket traffic from `$HOME` and non-project directories.
+- **gitstatusd integration** (Phase 2): Added support for the high-performance `gitstatusd` daemon. Provides 10–50× faster git status updates on large repositories. Includes automatic discovery, custom binary path support, and graceful fallback to zsh-async git.
 
 - **Directory gates for cloud/k8s context** (mirroring the docker pattern):
   - `_purity_has_kube_config`: gates kubectl context on `$KUBECONFIG` or `~/.kube/config`. Prevents kubectl invocations in directories where Kubernetes isn't configured (defends against slow `exec` auth providers).
