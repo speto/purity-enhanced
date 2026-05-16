@@ -75,80 +75,78 @@ _purity_cached_version() {
 	echo "$version"
 }
 
-# Detect languages synchronously using upsearch + cached versions
+# Command runner for language version detection.
+# Default (sync): _purity_cached_version (in-process memory cache + command -v guard).
+# With --async flag: explicit command -v check + _purity_timeout 2 for background-worker safety.
+_purity_lang_run_cmd() {
+	if [[ "${1:-}" == "--async" ]]; then
+		shift; local cmd="$1"; shift
+		command -v "$cmd" &>/dev/null || return 1
+		_purity_timeout 2 "$cmd" "$@"
+	else
+		_purity_cached_version "$@"
+	fi
+}
+
+# Detect version string for one language. Returns version string or empty.
+# Usage: _purity_detect_lang_version <key> [--async]
+_purity_detect_lang_version() {
+	local key="$1" aflag="${2:-}" v=""
+	# Check PURITY_SHOW toggle and upsearch for project file
+	case $key in
+		node)   [[ "${PURITY_SHOW_NODE:-1}" != "0" ]] && _purity_upsearch package.json .nvmrc .node-version || return 1 ;;
+		ruby)   [[ "${PURITY_SHOW_RUBY:-1}" != "0" ]] && _purity_upsearch Gemfile .ruby-version || return 1 ;;
+		python) [[ "${PURITY_SHOW_PYTHON_VERSION:-1}" != "0" ]] && _purity_upsearch pyproject.toml requirements.txt setup.py .python-version || return 1 ;;
+		go)     [[ "${PURITY_SHOW_GO:-1}" != "0" ]] && _purity_upsearch go.mod || return 1 ;;
+		rust)   [[ "${PURITY_SHOW_RUST:-1}" != "0" ]] && _purity_upsearch Cargo.toml || return 1 ;;
+		java)   [[ "${PURITY_SHOW_JAVA:-1}" != "0" ]] && _purity_upsearch pom.xml build.gradle build.gradle.kts || return 1 ;;
+		php)    [[ "${PURITY_SHOW_PHP:-1}" != "0" ]] && _purity_upsearch composer.json .php-version || return 1 ;;
+		*)      return 1 ;;
+	esac
+	# Extract version (check files first for speed, fall back to command)
+	case $key in
+		node)
+			[[ -f .nvmrc ]] && v="$(cat .nvmrc 2>/dev/null | sed 's/^v//' | cut -d'.' -f1)" ||
+			{ [[ -f .node-version ]] && v="$(cat .node-version 2>/dev/null | sed 's/^v//' | cut -d'.' -f1)"; } ||
+			v="$(_purity_lang_run_cmd $aflag node --version 2>/dev/null | sed 's/^v//' | cut -d'.' -f1)" ;;
+		ruby)
+			[[ -f .ruby-version ]] && v="$(cat .ruby-version 2>/dev/null | cut -d'.' -f1-2)" ||
+			v="$(_purity_lang_run_cmd $aflag ruby --version 2>/dev/null | awk '{print $2}' | cut -d'p' -f1 | cut -d'.' -f1-2)" ;;
+		python)
+			[[ -f .python-version ]] && v="$(cat .python-version 2>/dev/null | cut -d'.' -f1-2)" ||
+			v="$(_purity_lang_run_cmd $aflag python --version 2>/dev/null | awk '{print $2}' | cut -d'.' -f1-2)" ;;
+		go)
+			v="$(grep '^go ' go.mod 2>/dev/null | awk '{print $2}' | cut -d'.' -f1-2)"
+			[[ -z "$v" ]] && v="$(_purity_lang_run_cmd $aflag go version 2>/dev/null | awk '{print $3}' | sed 's/go//' | cut -d'.' -f1-2)" ;;
+		rust)
+			if [[ -f rust-toolchain ]] || [[ -f rust-toolchain.toml ]]; then
+				v="$(grep -E '^[0-9]|channel.*[0-9]' rust-toolchain rust-toolchain.toml 2>/dev/null | head -n1 | grep -o '[0-9][0-9.]*' | cut -d'.' -f1-2)"
+			fi
+			[[ -z "$v" ]] && v="$(_purity_lang_run_cmd $aflag rustc --version 2>/dev/null | awk '{print $2}' | cut -d'.' -f1-2)" ;;
+		java)
+			# java -version outputs to stderr; handle both modes with explicit 2>&1
+			if [[ "$aflag" == "--async" ]]; then
+				command -v java &>/dev/null && v="$(_purity_timeout 2 java -version 2>&1 | head -n1 | awk -F '"' '{print $2}' | cut -d'.' -f1)"
+			else
+				command -v java &>/dev/null && v="$(java -version 2>&1 | head -n1 | awk -F '"' '{print $2}' | cut -d'.' -f1)"
+			fi ;;
+		php)
+			v="$(_purity_lang_run_cmd $aflag php --version 2>/dev/null | head -n1 | awk '{print $2}' | cut -d'-' -f1 | cut -d'.' -f1-2)" ;;
+	esac
+	echo "$v"
+}
+
+# Detect languages synchronously using upsearch + cached versions.
 # Sets typeset -g _purity_sync_languages="node:18 php:8.5"
 prompt_purity_enhanced_sync_languages() {
 	[[ "${_purity_show_runtimes:-1}" == "0" ]] && { typeset -g _purity_sync_languages=""; return; }
-
-	local result=""
-
-	# Node.js
-	if [[ "${PURITY_SHOW_NODE:-1}" != "0" ]] && _purity_upsearch package.json .nvmrc .node-version; then
-		local v=""
-		if [[ -f .nvmrc ]]; then
-			v="$(cat .nvmrc 2>/dev/null | sed 's/^v//' | cut -d'.' -f1)"
-		elif [[ -f .node-version ]]; then
-			v="$(cat .node-version 2>/dev/null | sed 's/^v//' | cut -d'.' -f1)"
-		else
-			v=$(_purity_cached_version node --version | sed 's/^v//' | cut -d'.' -f1)
-		fi
-		[[ -n "$v" ]] && result+="node:${v} "
-	fi
-
-	# Ruby
-	if [[ "${PURITY_SHOW_RUBY:-1}" != "0" ]] && _purity_upsearch Gemfile .ruby-version; then
-		local v=""
-		if [[ -f .ruby-version ]]; then
-			v="$(cat .ruby-version 2>/dev/null | cut -d'.' -f1-2)"
-		else
-			v=$(_purity_cached_version ruby --version | awk '{print $2}' | cut -d'p' -f1 | cut -d'.' -f1-2)
-		fi
-		[[ -n "$v" ]] && result+="ruby:${v} "
-	fi
-
-	# Python
-	if [[ "${PURITY_SHOW_PYTHON_VERSION:-1}" != "0" ]] && _purity_upsearch pyproject.toml requirements.txt setup.py .python-version; then
-		local v=""
-		if [[ -f .python-version ]]; then
-			v="$(cat .python-version 2>/dev/null | cut -d'.' -f1-2)"
-		else
-			v=$(_purity_cached_version python --version | awk '{print $2}' | cut -d'.' -f1-2)
-		fi
-		[[ -n "$v" ]] && result+="python:${v} "
-	fi
-
-	# Go
-	if [[ "${PURITY_SHOW_GO:-1}" != "0" ]] && _purity_upsearch go.mod; then
-		local v=""
-		v="$(grep '^go ' go.mod 2>/dev/null | awk '{print $2}' | cut -d'.' -f1-2)"
-		[[ -z "$v" ]] && v=$(_purity_cached_version go version | awk '{print $3}' | sed 's/go//' | cut -d'.' -f1-2)
-		[[ -n "$v" ]] && result+="go:${v} "
-	fi
-
-	# Rust
-	if [[ "${PURITY_SHOW_RUST:-1}" != "0" ]] && _purity_upsearch Cargo.toml; then
-		local v=""
-		v=$(_purity_cached_version rustc --version | awk '{print $2}' | cut -d'.' -f1-2)
-		[[ -n "$v" ]] && result+="rust:${v} "
-	fi
-
-	# Java
-	if [[ "${PURITY_SHOW_JAVA:-1}" != "0" ]] && _purity_upsearch pom.xml build.gradle build.gradle.kts; then
-		local v=""
-		v=$(_purity_cached_version java -version 2>&1 | head -n1 | awk -F '"' '{print $2}' | cut -d'.' -f1)
-		[[ -n "$v" ]] && result+="java:${v} "
-	fi
-
-	# PHP
-	if [[ "${PURITY_SHOW_PHP:-1}" != "0" ]] && _purity_upsearch composer.json .php-version; then
-		local v=""
-		v=$(_purity_cached_version php --version | head -n1 | awk '{print $2}' | cut -d'-' -f1 | cut -d'.' -f1-2)
-		[[ -n "$v" ]] && result+="php:${v} "
-	fi
-
+	local result="" v
+	for key in node ruby python go rust java php; do
+		v="$(_purity_detect_lang_version "$key")"
+		[[ -n "$v" ]] && result+="${key}:${v} "
+	done
 	typeset -g _purity_sync_languages="${result% }"
 }
-
 
 # Walk up from $PWD checking each parent for marker files (Spaceship/p10k pattern)
 # Usage: _purity_upsearch file1 file2 ...
@@ -1309,107 +1307,25 @@ prompt_purity_enhanced_async_k8s_context() {
 	[[ "$result" != "k8s:none" && "$result" != "k8s:timeout" ]] && echo "$result"
 }
 
-# Async language version detection - Enhanced with file-based caching and parallel checks
+# Async language version detection - file-based caching, per-language timeout safety.
 prompt_purity_enhanced_async_language_versions() {
-	local result=""
-
 	[[ "${_purity_show_runtimes:-1}" == "0" ]] && return
-	
-	# Generate smart cache key per project directory
+
 	local cache_key="$(prompt_purity_enhanced_generate_cache_key "languages")"
-	
-	# Check cache first - languages change rarely, so cache for longer
 	local cached_result
 	if cached_result="$(prompt_purity_enhanced_cache_get "$cache_key" "${PURITY_CACHE_TTL_FAST}" 2>/dev/null)" && [[ -n "$cached_result" ]]; then
 		echo "$cached_result"
 		return
 	fi
-	
-	# Check for version files first (fast) before calling commands (slow)
-	# Node.js version - check .nvmrc or .node-version first
-	if [[ "${PURITY_SHOW_NODE:-1}" != "0" ]] && _purity_upsearch package.json .nvmrc .node-version && command -v node &>/dev/null; then
-		local node_version
-		# Try version files first (much faster)
-		if [[ -f .nvmrc ]]; then
-			node_version="$(cat .nvmrc 2>/dev/null | sed 's/^v//' | cut -d'.' -f1)"
-		elif [[ -f .node-version ]]; then
-			node_version="$(cat .node-version 2>/dev/null | sed 's/^v//' | cut -d'.' -f1)"
-		else
-			# Fallback to node command with shorter timeout
-			node_version=$(_purity_timeout 2 node --version 2>/dev/null | sed 's/^v//' | cut -d'.' -f1)
-		fi
-		[[ -n "$node_version" ]] && result+="node:${node_version} "
-	fi
-	
-	# Ruby version - check .ruby-version first
-	if [[ "${PURITY_SHOW_RUBY:-1}" != "0" ]] && _purity_upsearch Gemfile .ruby-version && command -v ruby &>/dev/null; then
-		local ruby_version
-		if [[ -f .ruby-version ]]; then
-			ruby_version="$(cat .ruby-version 2>/dev/null | cut -d'.' -f1-2)"
-		else
-			ruby_version=$(_purity_timeout 2 ruby --version 2>/dev/null | awk '{print $2}' | cut -d'p' -f1 | cut -d'.' -f1-2)
-		fi
-		[[ -n "$ruby_version" ]] && result+="ruby:${ruby_version} "
-	fi
-	
-	# Python version - check .python-version first
-	if [[ "${PURITY_SHOW_PYTHON_VERSION:-1}" != "0" ]] && _purity_upsearch pyproject.toml requirements.txt setup.py .python-version && command -v python &>/dev/null; then
-		local python_version
-		if [[ -f .python-version ]]; then
-			python_version="$(cat .python-version 2>/dev/null | cut -d'.' -f1-2)"
-		else
-			python_version=$(_purity_timeout 2 python --version 2>/dev/null | awk '{print $2}' | cut -d'.' -f1-2)
-		fi
-		[[ -n "$python_version" ]] && result+="python:${python_version} "
-	fi
-	
-	# Go version - check go.mod for version hint first
-	if [[ "${PURITY_SHOW_GO:-1}" != "0" ]] && _purity_upsearch go.mod && command -v go &>/dev/null; then
-		local go_version
-		# Try to extract go version from go.mod first
-		local mod_version="$(grep '^go ' go.mod 2>/dev/null | awk '{print $2}' | cut -d'.' -f1-2)"
-		if [[ -n "$mod_version" ]]; then
-			go_version="$mod_version"
-		else
-			go_version=$(_purity_timeout 2 go version 2>/dev/null | awk '{print $3}' | sed 's/go//' | cut -d'.' -f1-2)
-		fi
-		[[ -n "$go_version" ]] && result+="go:${go_version} "
-	fi
-	
-	# Rust version - check rust-toolchain first
-	if [[ "${PURITY_SHOW_RUST:-1}" != "0" ]] && _purity_upsearch Cargo.toml && command -v rustc &>/dev/null; then
-		local rust_version
-		if [[ -f rust-toolchain ]] || [[ -f rust-toolchain.toml ]]; then
-			# Extract version from toolchain file
-			rust_version="$(grep -E '^[0-9]|channel.*[0-9]' rust-toolchain rust-toolchain.toml 2>/dev/null | head -n1 | grep -o '[0-9][0-9.]*' | cut -d'.' -f1-2)"
-		fi
-		if [[ -z "$rust_version" ]]; then
-			rust_version=$(_purity_timeout 2 rustc --version 2>/dev/null | awk '{print $2}' | cut -d'.' -f1-2)
-		fi
-		[[ -n "$rust_version" ]] && result+="rust:${rust_version} "
-	fi
-	
-	# Java version - shorter timeout for better responsiveness
-	if [[ "${PURITY_SHOW_JAVA:-1}" != "0" ]] && _purity_upsearch pom.xml build.gradle build.gradle.kts && command -v java &>/dev/null; then
-		local java_version
-		java_version=$(_purity_timeout 2 java -version 2>&1 | head -n1 | awk -F '"' '{print $2}' | cut -d'.' -f1)
-		[[ -n "$java_version" ]] && result+="java:${java_version} "
-	fi
-	
-	# PHP version - shorter timeout for better responsiveness
-	if [[ "${PURITY_SHOW_PHP:-1}" != "0" ]] && _purity_upsearch composer.json .php-version && command -v php &>/dev/null; then
-		local php_version
-		php_version=$(_purity_timeout 2 php --version 2>/dev/null | head -n1 | awk '{print $2}' | cut -d'-' -f1 | cut -d'.' -f1-2)
-		[[ -n "$php_version" ]] && result+="php:${php_version} "
-	fi
-	
-	# Remove trailing space
+
+	local result="" v
+	for key in node ruby python go rust java php; do
+		v="$(_purity_detect_lang_version "$key" --async)"
+		[[ -n "$v" ]] && result+="${key}:${v} "
+	done
 	result="${result% }"
-	
-	# Cache result using both smart key and legacy key (even if empty to prevent repeated calls)
+
 	prompt_purity_enhanced_cache_set "$cache_key" "${result:-languages:none}"
-	
-	
 	[[ -n "$result" && "$result" != "languages:none" ]] && echo "$result"
 }
 
