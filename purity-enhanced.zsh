@@ -1155,14 +1155,7 @@ prompt_purity_enhanced_detect_repo_role() {
 
 	# 3. Check if main repo with worktrees
 	if [[ "$git_dir" == ".git" ]] || [[ "$git_dir" == *"/.git" ]]; then
-		# Check if this repo has worktrees
-		local worktree_count
-		worktree_count=$(command git worktree list 2>/dev/null | wc -l)
-		if [[ $worktree_count -gt 1 ]]; then
-			_purity_repo_role="main"
-		else
-			_purity_repo_role="main"
-		fi
+		_purity_repo_role="main"
 		# Get branch name
 		_purity_branch_name=$(command git symbolic-ref --short HEAD 2>/dev/null || command git rev-parse --short HEAD 2>/dev/null)
 		return 0
@@ -1197,9 +1190,6 @@ prompt_purity_enhanced_async_context() {
 		context_output=$(prompt_purity_enhanced_async_k8s_context)
 		[[ -n "$context_output" ]] && output+=("k8s:$context_output")
 	fi
-
-	# NOTE: Language detection is now SYNC (runs in precmd via prompt_purity_enhanced_sync_languages)
-	# This eliminates the one-prompt delay for language indicators after cd.
 
 	if [[ "${_purity_show_cloud:-1}" == "1" ]] && (( ${PURITY_ASYNC_CLOUD:-1} )); then
 		_purity_maybe_invalidate_cache "cloud"
@@ -1595,94 +1585,67 @@ prompt_purity_enhanced_render() {
 	unset prompt_purity_enhanced_async_render_requested
 }
 
-# Immediate async refresh (like Pure's prompt_pure_async_refresh)
-
 # ================================================================================================
 # CONTEXT RENDERING AND MANAGEMENT
 # ================================================================================================
 
-# Build context line from async state and cached data
-prompt_purity_enhanced_build_context_line() {
-	local -a context_items
-	
-	# Show virtualenv if activated (synchronous, fast)
-	if [[ "${PURITY_SHOW_PYTHON:-1}" != "0" ]] && [[ -n $VIRTUAL_ENV ]]; then
-		context_items+=("%F{${_purity_colors[virtualenv]}}(${VIRTUAL_ENV:t})%f")
-	fi
-	
-	# Add background jobs to context indicators (moved to be early in context)
-	if (( ${#jobstates} )); then
-		context_items+=("%F{${_purity_colors[suspended_jobs]}}[✦${#jobstates}]%f")
-	fi
-	
-	# Parse and display Docker info from async state
-	if [[ "${_purity_show_docker:-1}" != "0" ]] && [[ "${PURITY_SHOW_DOCKER:-1}" != "0" ]] && [[ -n ${prompt_purity_enhanced_context_info[docker]} ]]; then
-		local docker_info="${prompt_purity_enhanced_context_info[docker]}"
-		if [[ $docker_info =~ "docker:running=([0-9]+) total=([0-9]+)" ]]; then
-			local running_count="${match[1]}"
-			local total_count="${match[2]}"
-			context_items+=("%F{${_purity_colors[docker]}}🐳 ${running_count}/${total_count}%f")
-		fi
-	fi
-	
-	# Parse and display Kubernetes info from async state
-	if [[ "${_purity_show_cloud:-1}" != "0" ]] && [[ "${PURITY_SHOW_KUBERNETES:-1}" != "0" ]] && [[ -n ${prompt_purity_enhanced_context_info[k8s]} ]]; then
-		local k8s_info="${prompt_purity_enhanced_context_info[k8s]}"
-		if [[ $k8s_info =~ "k8s:context=(.+)" ]]; then
-			local kube_context="${match[1]}"
-			context_items+=("%F{${_purity_colors[kubernetes]}}☸ ${kube_context}%f")
-		fi
-	fi
-	
-	# Display language versions from SYNC detection (immediate, no delay)
-	if [[ -n "${_purity_sync_languages}" ]]; then
-		local -A lang_versions
-		for item in ${(z)_purity_sync_languages}; do
-			if [[ $item =~ "([^:]+):(.+)" ]]; then
-				lang_versions[${match[1]}]="${match[2]}"
-			fi
-		done
+# Shared result var set by segment helpers (avoids subshell; preserves $jobstates).
+typeset -g  _purity_seg_result=""
+typeset -gA _purity_lang_emoji=([node]="⬢" [ruby]="💎" [python]="🐍" [go]="🐹" [rust]="🦀" [java]="☕" [php]="🐘")
 
-		[[ -n ${lang_versions[node]} ]] && {
-			context_items+=("%F{${_purity_colors[node]}}⬢ ${lang_versions[node]}%f")
-		}
-		[[ -n ${lang_versions[ruby]} ]] && {
-			context_items+=("%F{${_purity_colors[ruby]}}💎 ${lang_versions[ruby]}%f")
-		}
-		[[ -n ${lang_versions[python]} ]] && {
-			context_items+=("%F{${_purity_colors[python]}}🐍 ${lang_versions[python]}%f")
-		}
-		[[ -n ${lang_versions[go]} ]] && {
-			context_items+=("%F{${_purity_colors[go]}}🐹 ${lang_versions[go]}%f")
-		}
-		[[ -n ${lang_versions[rust]} ]] && {
-			context_items+=("%F{${_purity_colors[rust]}}🦀 ${lang_versions[rust]}%f")
-		}
-		[[ -n ${lang_versions[java]} ]] && {
-			context_items+=("%F{${_purity_colors[java]}}☕ ${lang_versions[java]}%f")
-		}
-		[[ -n ${lang_versions[php]} ]] && {
-			context_items+=("%F{${_purity_colors[php]}}🐘 ${lang_versions[php]}%f")
-		}
-	fi
-	
-	# Parse and display cloud/infra info from async state
-	if [[ "${_purity_show_cloud:-1}" != "0" ]]; then
-		local -A _cloud_all
-		local _ci
-		for _ci in ${(z)${prompt_purity_enhanced_context_info[cloud]:-}} \
-		            ${(z)${prompt_purity_enhanced_context_info[infra]:-}}; do
-			[[ $_ci =~ "([^:]+):(.+)" ]] && _cloud_all[${match[1]}]="${match[2]}"
-		done
-		for key in $_purity_cloud_keys; do
-			local sv_name="${_purity_cloud_show_var[$key]}"
-			local sv_val="${(P)sv_name}"
-			[[ "${sv_val:-1}" != "0" ]] && [[ -n "${_cloud_all[$key]}" ]] && \
-				context_items+=("%F{${_purity_colors[$key]}}${_purity_cloud_emoji[$key]} ${_cloud_all[$key]}%f")
-		done
-	fi
-	
-	# Store the built context line (no echo — this is called during async callback)
+_purity_ctx_seg_virtualenv() { [[ "${PURITY_SHOW_PYTHON:-1}" != "0" && -n $VIRTUAL_ENV ]] && _purity_seg_result="%F{${_purity_colors[virtualenv]}}(${VIRTUAL_ENV:t})%f" }
+_purity_ctx_seg_jobs()       { (( ${#jobstates} )) && _purity_seg_result="%F{${_purity_colors[suspended_jobs]}}[✦${#jobstates}]%f" }
+_purity_ctx_seg_aws_sync()   { [[ "${PURITY_SHOW_AWS:-1}" != "0" && -n "${AWS_PROFILE:-}" ]] && _purity_seg_result="%F{${_purity_colors[aws]}}☁ ${AWS_PROFILE}%f" }
+_purity_ctx_seg_docker() {
+	local d="${prompt_purity_enhanced_context_info[docker]:-}"
+	[[ "${_purity_show_docker:-1}" != "0" && "${PURITY_SHOW_DOCKER:-1}" != "0" &&
+		$d =~ "docker:running=([0-9]+) total=([0-9]+)" ]] &&
+			_purity_seg_result="%F{${_purity_colors[docker]}}🐳 ${match[1]}/${match[2]}%f"
+}
+_purity_ctx_seg_kubernetes() {
+	local k="${prompt_purity_enhanced_context_info[k8s]:-}"
+	[[ "${_purity_show_cloud:-1}" != "0" && "${PURITY_SHOW_KUBERNETES:-1}" != "0" &&
+		$k =~ "k8s:context=(.+)" ]] &&
+			_purity_seg_result="%F{${_purity_colors[kubernetes]}}☸ ${match[1]}%f"
+}
+_purity_ctx_seg_languages() {
+	[[ -n "${_purity_sync_languages}" ]] || return
+	local -A lv; local item
+	for item in ${(z)_purity_sync_languages}; do
+		[[ $item =~ "([^:]+):(.+)" ]] && lv[${match[1]}]="${match[2]}"
+	done
+	local -a out=(); local _l
+	for _l in node ruby python go rust java php; do
+		[[ -n ${lv[$_l]} ]] && out+=("%F{${_purity_colors[$_l]}}${_purity_lang_emoji[$_l]} ${lv[$_l]}%f")
+	done
+	(( ${#out} )) && _purity_seg_result="${(j: :)out}"
+}
+_purity_ctx_seg_cloud() {
+	[[ "${_purity_show_cloud:-1}" != "0" ]] || return
+	local -A _ca; local _ci key
+	for _ci in ${(z)${prompt_purity_enhanced_context_info[cloud]:-}} \
+	            ${(z)${prompt_purity_enhanced_context_info[infra]:-}}; do
+		[[ $_ci =~ "([^:]+):(.+)" ]] && _ca[${match[1]}]="${match[2]}"
+	done
+	local -a out=()
+	for key in $_purity_cloud_keys; do
+		[[ "${${(P)_purity_cloud_show_var[$key]}:-1}" != "0" && -n "${_ca[$key]}" ]] &&
+			out+=("%F{${_purity_colors[$key]}}${_purity_cloud_emoji[$key]} ${_ca[$key]}%f")
+	done
+	(( ${#out} )) && _purity_seg_result="${(j: :)out}"
+}
+typeset -ga _purity_ctx_segment_fns=(
+	_purity_ctx_seg_virtualenv _purity_ctx_seg_jobs
+	_purity_ctx_seg_docker     _purity_ctx_seg_kubernetes
+	_purity_ctx_seg_languages  _purity_ctx_seg_cloud
+)
+prompt_purity_enhanced_build_context_line() {
+	setopt local_options no_err_exit
+	local -a context_items; local _fn
+	for _fn in "${_purity_ctx_segment_fns[@]}"; do
+		_purity_seg_result=""; $_fn
+		[[ -n "$_purity_seg_result" ]] && context_items+=("$_purity_seg_result")
+	done
 	typeset -g prompt_purity_enhanced_context="${(j: :)context_items}"
 }
 
@@ -1864,26 +1827,13 @@ prompt_purity_enhanced_precmd() {
 
 # Fallback synchronous context collection (used when async is not available)
 prompt_purity_enhanced_fallback_sync_context() {
-	local context_line=""
-	
-	# Show virtualenv if activated (always synchronous)
-	if [[ "${PURITY_SHOW_PYTHON:-1}" != "0" ]] && [[ -n $VIRTUAL_ENV ]]; then
-		context_line+="%F{${_purity_colors[virtualenv]}}(${VIRTUAL_ENV:t})%f "
-	fi
-	
-	# Add background jobs to context indicators (moved to be early in context)
-	if (( ${#jobstates} )); then
-		context_line+="%F{${_purity_colors[suspended_jobs]}}[✦${#jobstates}]%f "
-	fi
-	
-	# Only show fast operations in sync fallback mode
-	# Show AWS profile if set (fast, from environment)
-	if [[ "${PURITY_SHOW_AWS:-1}" != "0" ]] && [[ -n "${AWS_PROFILE:-}" ]]; then
-		context_line+="%F{${_purity_colors[aws]}}☁ ${AWS_PROFILE}%f "
-	fi
-	
-	# Store context line globally for prompt use
-	typeset -g prompt_purity_enhanced_context="$context_line"
+	setopt local_options no_err_exit
+	local -a context_items; local _fn
+	for _fn in _purity_ctx_seg_virtualenv _purity_ctx_seg_jobs _purity_ctx_seg_aws_sync; do
+		_purity_seg_result=""; $_fn
+		[[ -n "$_purity_seg_result" ]] && context_items+=("$_purity_seg_result")
+	done
+	typeset -g prompt_purity_enhanced_context="${(j: :)context_items}"
 }
 
 # Function to get current git action (rebase, merge, etc.)
