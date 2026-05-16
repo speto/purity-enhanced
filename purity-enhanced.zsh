@@ -482,11 +482,9 @@ prompt_purity_enhanced_transient_generate() {
 	
 	# Determine prompt character color based on last exit status
 	if [[ "$show_errors" == "1" && "$last_exit" != "0" ]]; then
-		local error_color=$(prompt_purity_enhanced_get_color prompt_error red)
-		prompt_color="%F{$error_color}"
+		prompt_color="%F{${_purity_colors[prompt_error]}}"
 	else
-		local success_color=$(prompt_purity_enhanced_get_color prompt_success magenta)
-		prompt_color="%F{$success_color}"
+		prompt_color="%F{${_purity_colors[prompt_success]}}"
 	fi
 	
 	case "$style" in
@@ -509,8 +507,7 @@ prompt_purity_enhanced_transient_generate() {
 			if [[ -n "${prompt_purity_enhanced_transient_command_time:-}" ]]; then
 				exec_time=" [$(prompt_purity_enhanced_human_time "$prompt_purity_enhanced_transient_command_time")]"
 			elif [[ -n "${prompt_purity_enhanced_transient_timestamp:-}" ]]; then
-				local time_color=$(prompt_purity_enhanced_get_color execution_time 242)
-				exec_time="%F{$time_color} [${prompt_purity_enhanced_transient_timestamp}]%f"
+				exec_time="%F{${_purity_colors[execution_time]}} [${prompt_purity_enhanced_transient_timestamp}]%f"
 			fi
 			transient_prompt="${prompt_color}❯%f${exec_time}"
 			;;
@@ -1711,14 +1708,12 @@ prompt_purity_enhanced_build_context_line() {
 	
 	# Show virtualenv if activated (synchronous, fast)
 	if [[ "${PURITY_SHOW_PYTHON:-1}" != "0" ]] && [[ -n $VIRTUAL_ENV ]]; then
-		local venv_color=$(prompt_purity_enhanced_get_color virtualenv 242)
-		context_items+=("%F{$venv_color}(${VIRTUAL_ENV:t})%f")
+		context_items+=("%F{${_purity_colors[virtualenv]}}(${VIRTUAL_ENV:t})%f")
 	fi
 	
 	# Add background jobs to context indicators (moved to be early in context)
 	if (( ${#jobstates} )); then
-		local suspended_jobs_color=$(prompt_purity_enhanced_get_color suspended_jobs red)
-		context_items+=("%F{$suspended_jobs_color}[✦${#jobstates}]%f")
+		context_items+=("%F{${_purity_colors[suspended_jobs]}}[✦${#jobstates}]%f")
 	fi
 	
 	# Parse and display Docker info from async state
@@ -1727,8 +1722,7 @@ prompt_purity_enhanced_build_context_line() {
 		if [[ $docker_info =~ "docker:running=([0-9]+) total=([0-9]+)" ]]; then
 			local running_count="${match[1]}"
 			local total_count="${match[2]}"
-			local docker_color=$(prompt_purity_enhanced_get_color docker 39)
-			context_items+=("%F{$docker_color}🐳 ${running_count}/${total_count}%f")
+			context_items+=("%F{${_purity_colors[docker]}}🐳 ${running_count}/${total_count}%f")
 		fi
 	fi
 	
@@ -1737,8 +1731,7 @@ prompt_purity_enhanced_build_context_line() {
 		local k8s_info="${prompt_purity_enhanced_context_info[k8s]}"
 		if [[ $k8s_info =~ "k8s:context=(.+)" ]]; then
 			local kube_context="${match[1]}"
-			local kube_color=$(prompt_purity_enhanced_get_color kubernetes 45)
-			context_items+=("%F{$kube_color}☸ ${kube_context}%f")
+			context_items+=("%F{${_purity_colors[kubernetes]}}☸ ${kube_context}%f")
 		fi
 	fi
 	
@@ -1752,32 +1745,25 @@ prompt_purity_enhanced_build_context_line() {
 		done
 
 		[[ -n ${lang_versions[node]} ]] && {
-			local node_color=$(prompt_purity_enhanced_get_color node 70)
-			context_items+=("%F{$node_color}⬢ ${lang_versions[node]}%f")
+			context_items+=("%F{${_purity_colors[node]}}⬢ ${lang_versions[node]}%f")
 		}
 		[[ -n ${lang_versions[ruby]} ]] && {
-			local ruby_color=$(prompt_purity_enhanced_get_color ruby 196)
-			context_items+=("%F{$ruby_color}💎 ${lang_versions[ruby]}%f")
+			context_items+=("%F{${_purity_colors[ruby]}}💎 ${lang_versions[ruby]}%f")
 		}
 		[[ -n ${lang_versions[python]} ]] && {
-			local python_color=$(prompt_purity_enhanced_get_color python 226)
-			context_items+=("%F{$python_color}🐍 ${lang_versions[python]}%f")
+			context_items+=("%F{${_purity_colors[python]}}🐍 ${lang_versions[python]}%f")
 		}
 		[[ -n ${lang_versions[go]} ]] && {
-			local go_color=$(prompt_purity_enhanced_get_color go 81)
-			context_items+=("%F{$go_color}🐹 ${lang_versions[go]}%f")
+			context_items+=("%F{${_purity_colors[go]}}🐹 ${lang_versions[go]}%f")
 		}
 		[[ -n ${lang_versions[rust]} ]] && {
-			local rust_color=$(prompt_purity_enhanced_get_color rust 208)
-			context_items+=("%F{$rust_color}🦀 ${lang_versions[rust]}%f")
+			context_items+=("%F{${_purity_colors[rust]}}🦀 ${lang_versions[rust]}%f")
 		}
 		[[ -n ${lang_versions[java]} ]] && {
-			local java_color=$(prompt_purity_enhanced_get_color java 214)
-			context_items+=("%F{$java_color}☕ ${lang_versions[java]}%f")
+			context_items+=("%F{${_purity_colors[java]}}☕ ${lang_versions[java]}%f")
 		}
 		[[ -n ${lang_versions[php]} ]] && {
-			local php_color=$(prompt_purity_enhanced_get_color php 111)
-			context_items+=("%F{$php_color}🐘 ${lang_versions[php]}%f")
+			context_items+=("%F{${_purity_colors[php]}}🐘 ${lang_versions[php]}%f")
 		}
 	fi
 	
@@ -1795,16 +1781,13 @@ prompt_purity_enhanced_build_context_line() {
 		
 		# Display each cloud service
 		[[ "${PURITY_SHOW_AWS:-1}" != "0" ]] && [[ -n ${cloud_services[aws]} ]] && {
-			local aws_color=$(prompt_purity_enhanced_get_color aws 208)
-			context_items+=("%F{$aws_color}☁ ${cloud_services[aws]}%f")
+			context_items+=("%F{${_purity_colors[aws]}}☁ ${cloud_services[aws]}%f")
 		}
 		[[ "${PURITY_SHOW_GCP:-1}" != "0" ]] && [[ -n ${cloud_services[gcp]} ]] && {
-			local gcp_color=$(prompt_purity_enhanced_get_color gcp 33)
-			context_items+=("%F{$gcp_color}☁️ ${cloud_services[gcp]}%f")
+			context_items+=("%F{${_purity_colors[gcp]}}☁️ ${cloud_services[gcp]}%f")
 		}
 		[[ "${PURITY_SHOW_AZURE:-1}" != "0" ]] && [[ -n ${cloud_services[azure]} ]] && {
-			local azure_color=$(prompt_purity_enhanced_get_color azure 39)
-			context_items+=("%F{$azure_color}🌐 ${cloud_services[azure]}%f")
+			context_items+=("%F{${_purity_colors[azure]}}🌐 ${cloud_services[azure]}%f")
 		}
 	fi
 	
@@ -1822,12 +1805,10 @@ prompt_purity_enhanced_build_context_line() {
 		
 		# Display each infrastructure tool
 		[[ "${PURITY_SHOW_TERRAFORM:-1}" != "0" ]] && [[ -n ${infra_tools[terraform]} ]] && {
-			local terraform_color=$(prompt_purity_enhanced_get_color terraform 214)
-			context_items+=("%F{$terraform_color}🏗️ ${infra_tools[terraform]}%f")
+			context_items+=("%F{${_purity_colors[terraform]}}🏗️ ${infra_tools[terraform]}%f")
 		}
 		[[ "${PURITY_SHOW_PULUMI:-1}" != "0" ]] && [[ -n ${infra_tools[pulumi]} ]] && {
-			local pulumi_color=$(prompt_purity_enhanced_get_color pulumi 165)
-			context_items+=("%F{$pulumi_color}📦 ${infra_tools[pulumi]}%f")
+			context_items+=("%F{${_purity_colors[pulumi]}}📦 ${infra_tools[pulumi]}%f")
 		}
 	fi
 	
@@ -2039,8 +2020,7 @@ prompt_purity_enhanced_precmd() {
 	# Always show execution time if present (following Pure's pattern)
 	local exec_time="$(prompt_purity_enhanced_cmd_exec_time)"
 	if [[ -n "$exec_time" ]]; then
-		local exec_time_color=$(prompt_purity_enhanced_get_color execution_time yellow)
-		print -P " %F{$exec_time_color}⌚ $exec_time%f"
+		print -P " %F{${_purity_colors[execution_time]}}⌚ $exec_time%f"
 	fi
 	
 	# Always set title (following Pure's pattern)
@@ -2079,21 +2059,18 @@ prompt_purity_enhanced_fallback_sync_context() {
 	
 	# Show virtualenv if activated (always synchronous)
 	if [[ "${PURITY_SHOW_PYTHON:-1}" != "0" ]] && [[ -n $VIRTUAL_ENV ]]; then
-		local venv_color=$(prompt_purity_enhanced_get_color virtualenv 242)
-		context_line+="%F{$venv_color}(${VIRTUAL_ENV:t})%f "
+		context_line+="%F{${_purity_colors[virtualenv]}}(${VIRTUAL_ENV:t})%f "
 	fi
 	
 	# Add background jobs to context indicators (moved to be early in context)
 	if (( ${#jobstates} )); then
-		local suspended_jobs_color=$(prompt_purity_enhanced_get_color suspended_jobs red)
-		context_line+="%F{$suspended_jobs_color}[✦${#jobstates}]%f "
+		context_line+="%F{${_purity_colors[suspended_jobs]}}[✦${#jobstates}]%f "
 	fi
 	
 	# Only show fast operations in sync fallback mode
 	# Show AWS profile if set (fast, from environment)
 	if [[ "${PURITY_SHOW_AWS:-1}" != "0" ]] && [[ -n "${AWS_PROFILE:-}" ]]; then
-		local aws_color=$(prompt_purity_enhanced_get_color aws 208)
-		context_line+="%F{$aws_color}☁ ${AWS_PROFILE}%f "
+		context_line+="%F{${_purity_colors[aws]}}☁ ${AWS_PROFILE}%f "
 	fi
 	
 	# Store context line globally for prompt use
@@ -2129,8 +2106,7 @@ prompt_purity_enhanced_git_action() {
 	fi
 
 	if [[ -n "$action" ]]; then
-		local action_color=$(prompt_purity_enhanced_get_color git:action yellow)
-		echo " %F{$action_color}$action%f"
+		echo " %F{${_purity_colors[git:action]}}$action%f"
 	fi
 }
 
@@ -2154,8 +2130,7 @@ prompt_purity_enhanced_worktree_segment() {
 	local action="${prompt_purity_enhanced_vcs_info[action]}"
 
 	if [[ "$_purity_repo_role" == "worktree" ]]; then
-		local worktree_color
-		worktree_color=$(prompt_purity_enhanced_get_color git:worktree 242)
+		local worktree_color=${_purity_colors[git:worktree]}
 		if [[ "$_purity_show_worktree_name" == "1" ]] && [[ -n "$_purity_worktree_name" ]]; then
 			segment="%F{$worktree_color}𖠰 ${_purity_worktree_name}%f"
 		else
@@ -2165,8 +2140,7 @@ prompt_purity_enhanced_worktree_segment() {
 	fi
 
 	if [[ -n "$action" ]]; then
-		local action_color
-		action_color=$(prompt_purity_enhanced_get_color git:action red)
+		local action_color=${_purity_colors[git:action]}
 		if [[ -n "$segment" ]]; then
 			segment+=" | %F{$action_color}${action}%f"
 		else
@@ -2261,13 +2235,26 @@ prompt_purity_git_status() {
 	return 0
 }
 
-# Get a color value from zstyle with fallback
+# Build color lookup table once at setup time (reads zstyle; all render fns use _purity_colors[key])
+_purity_init_colors() {
+	typeset -gA _purity_colors=(
+		[path]=blue           [git:branch]=yellow   [git:action]=red      [git:worktree]=242
+		[prompt:success]=green [prompt:error]=red   [prompt_success]=magenta [prompt_error]=red
+		[execution_time]=yellow [virtualenv]=242    [suspended_jobs]=red  [host]=242
+		[node]=70              [ruby]=196           [python]=226          [go]=81
+		[rust]=208             [java]=214           [php]=99              [docker]=39
+		[kubernetes]=45        [aws]=208            [terraform]=214       [gcp]=33
+		[azure]=39             [pulumi]=165
+	)
+	local key _v
+	for key in ${(k)_purity_colors}; do
+		zstyle -s ":prompt:purity-enhanced:$key" color _v && _purity_colors[$key]=$_v
+	done
+}
+
+# Compatibility shim — external callers still work; internally use _purity_colors[]
 prompt_purity_enhanced_get_color() {
-	local color_name=$1
-	local default_color=$2
-	local color
-	zstyle -s :prompt:purity-enhanced:$color_name color color || color=$default_color
-	echo $color
+	echo "${_purity_colors[$1]:-$2}"
 }
 
 # ================================================================================================
@@ -2365,8 +2352,7 @@ prompt_purity_enhanced_async_tasks() {
 # Immediate git branch display (sync, like Pure)
 prompt_purity_enhanced_git_branch_sync() {
 	command git rev-parse --is-inside-work-tree &>/dev/null || return 0
-	local branch_color
-	branch_color=$(prompt_purity_enhanced_get_color git:branch yellow)
+	local branch_color=${_purity_colors[git:branch]}
 	local branch
 	branch=$(command git branch --show-current 2>/dev/null) || return
 	# Shorten long branch names: keep prefix…suffix
@@ -2477,37 +2463,16 @@ prompt_purity_enhanced_setup() {
 		mkdir -p "$PURITY_CACHE_DIR" 2>/dev/null || true
 	fi
 
-	# Set up default colors (can be overridden via zstyle)
-	local path_color=$(prompt_purity_enhanced_get_color path blue)
-	git_branch_color=$(prompt_purity_enhanced_get_color git:branch yellow)
-	local git_action_color=$(prompt_purity_enhanced_get_color git:action yellow)
-	local git_worktree_color=$(prompt_purity_enhanced_get_color git:worktree green)
-	local prompt_success_color=$(prompt_purity_enhanced_get_color prompt:success green)
-	local prompt_error_color=$(prompt_purity_enhanced_get_color prompt:error red)
-	local execution_time_color=$(prompt_purity_enhanced_get_color execution_time yellow)
-	local virtualenv_color=$(prompt_purity_enhanced_get_color virtualenv 242)
-	local suspended_jobs_color=$(prompt_purity_enhanced_get_color suspended_jobs red)
-	local user_host_color=$(prompt_purity_enhanced_get_color host 242)
-	
-	# Additional language and infrastructure colors
-	local ruby_color=$(prompt_purity_enhanced_get_color ruby 196)
-	local python_color=$(prompt_purity_enhanced_get_color python 226)
-	local go_color=$(prompt_purity_enhanced_get_color go 81)
-	local rust_color=$(prompt_purity_enhanced_get_color rust 208)
-	local java_color=$(prompt_purity_enhanced_get_color java 214)
-	local php_color=$(prompt_purity_enhanced_get_color php 99)
-	local terraform_color=$(prompt_purity_enhanced_get_color terraform 214)
-	local gcp_color=$(prompt_purity_enhanced_get_color gcp 33)
-	local azure_color=$(prompt_purity_enhanced_get_color azure 39)
-	local pulumi_color=$(prompt_purity_enhanced_get_color pulumi 165)
+	# Build color lookup table once (reads zstyle; all render functions use _purity_colors[key])
+	_purity_init_colors
 
 	# show username@host if logged in through SSH or in a container
 	if [[ -n "$SSH_CONNECTION" ]] || [[ -f /.dockerenv ]] || [[ -n "$KUBERNETES_SERVICE_HOST" ]]; then
-		prompt_purity_enhanced_username="%F{$user_host_color}%n@%m%f "
+		prompt_purity_enhanced_username="%F{${_purity_colors[host]}}%n@%m%f "
 	fi
 
 	# Ccstatusline-inspired clean prompt: path [context] [git] ❯
-	PROMPT="${prompt_purity_enhanced_username}%F{$path_color}%~%f\$(prompt_purity_enhanced_optional_context)\$(prompt_purity_enhanced_optional_git) %(?.%F{$prompt_success_color}.%F{$prompt_error_color})❯%f "
+	PROMPT="${prompt_purity_enhanced_username}%F{${_purity_colors[path]}}%~%f\$(prompt_purity_enhanced_optional_context)\$(prompt_purity_enhanced_optional_git) %(?.%F{${_purity_colors[prompt:success]}}.%F{${_purity_colors[prompt:error]}})❯%f "
 	RPROMPT='%F{red}%(?..⏎)%f'
 }
 
