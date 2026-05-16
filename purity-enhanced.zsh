@@ -398,13 +398,6 @@ prompt_purity_enhanced_optional_git() {
 # Values: minimal, balanced (default), detailed
 : ${PURITY_PRESET:=balanced}
 
-# Internal flags set by preset system (can be overridden by explicit PURITY_SHOW_* variables)
-typeset -g _purity_show_worktree_role=1
-typeset -g _purity_git_style="compact"
-typeset -g _purity_show_docker=1
-typeset -g _purity_show_runtimes=1
-typeset -g _purity_show_cloud=1
-
 # Context display options (set to 0 to disable)
 # These override preset defaults when explicitly set.
 # Snapshot which vars the USER explicitly set BEFORE :=1 defaults fill them in.
@@ -2019,61 +2012,35 @@ prompt_purity_enhanced_get_color() {
 # ================================================================================================
 # PRESET SYSTEM LOADER
 # ================================================================================================
-
-# Load preset configuration and set internal flags
-# Presets: minimal, balanced (default), detailed
+# Central dispatch table: preset → internal flag defaults (3 presets × 5 flags)
+typeset -gA _purity_preset_defaults=(
+	[minimal:_purity_show_worktree_role]=0  [minimal:_purity_git_style]=dirty
+	[minimal:_purity_show_docker]=0          [minimal:_purity_show_runtimes]=0   [minimal:_purity_show_cloud]=0
+	[balanced:_purity_show_worktree_role]=1 [balanced:_purity_git_style]=compact
+	[balanced:_purity_show_docker]=1         [balanced:_purity_show_runtimes]=1  [balanced:_purity_show_cloud]=0
+	[detailed:_purity_show_worktree_role]=1 [detailed:_purity_git_style]=full
+	[detailed:_purity_show_docker]=1         [detailed:_purity_show_runtimes]=1  [detailed:_purity_show_cloud]=1
+)
 prompt_purity_enhanced_load_preset() {
 	local preset="${PURITY_PRESET:-balanced}"
-	
-	# Initialize defaults based on preset
-	case "$preset" in
-		minimal)
-			# Minimal preset: close to original purity-enhanced experience
-			typeset -g _purity_show_worktree_role=0
-			typeset -g _purity_git_style="dirty"
-			typeset -g _purity_show_docker=0
-			typeset -g _purity_show_runtimes=0
-			typeset -g _purity_show_cloud=0
-			;;
-		detailed)
-			# Detailed preset: enable all contexts
-			typeset -g _purity_show_worktree_role=1
-			typeset -g _purity_git_style="full"
-			typeset -g _purity_show_docker=1
-			typeset -g _purity_show_runtimes=1
-			typeset -g _purity_show_cloud=1
-			;;
-		balanced|*)
-			# Balanced preset (default): essential contexts with worktree awareness
-			typeset -g _purity_show_worktree_role=1
-			typeset -g _purity_git_style="compact"
-			typeset -g _purity_show_docker=1
-			typeset -g _purity_show_runtimes=1
-			typeset -g _purity_show_cloud=0
-			;;
-	esac
-	# Re-apply explicit PURITY_SHOW_* overrides — only for vars the USER explicitly set
-	# (detected via snapshot taken before :=1 defaults ran, stored in _purity_user_set_show)
-	[[ -n "${_purity_user_set_show[docker]}"     ]] && _purity_show_docker="${PURITY_SHOW_DOCKER}"
-	[[ -n "${_purity_user_set_show[kubernetes]}" ]] && _purity_show_cloud="${PURITY_SHOW_KUBERNETES}"
-	# For runtime group: enable only if at least one member was explicitly set to 1
-	if [[ "${PURITY_SHOW_NODE:-0}" == "1" && -n "${_purity_user_set_show[node]}" ]] || \
-	   [[ "${PURITY_SHOW_RUBY:-0}" == "1" && -n "${_purity_user_set_show[ruby]}" ]] || \
-	   [[ "${PURITY_SHOW_PYTHON_VERSION:-0}" == "1" && -n "${_purity_user_set_show[python_version]}" ]] || \
-	   [[ "${PURITY_SHOW_GO:-0}" == "1" && -n "${_purity_user_set_show[go]}" ]] || \
-	   [[ "${PURITY_SHOW_RUST:-0}" == "1" && -n "${_purity_user_set_show[rust]}" ]] || \
-	   [[ "${PURITY_SHOW_JAVA:-0}" == "1" && -n "${_purity_user_set_show[java]}" ]] || \
-	   [[ "${PURITY_SHOW_PHP:-0}" == "1" && -n "${_purity_user_set_show[php]}" ]]; then
-		_purity_show_runtimes=1
-	fi
-	# For cloud group: enable only if at least one member was explicitly set to 1
-	if [[ "${PURITY_SHOW_AWS:-0}" == "1" && -n "${_purity_user_set_show[aws]}" ]] || \
-	   [[ "${PURITY_SHOW_GCP:-0}" == "1" && -n "${_purity_user_set_show[gcp]}" ]] || \
-	   [[ "${PURITY_SHOW_AZURE:-0}" == "1" && -n "${_purity_user_set_show[azure]}" ]] || \
-	   [[ "${PURITY_SHOW_TERRAFORM:-0}" == "1" && -n "${_purity_user_set_show[terraform]}" ]] || \
-	   [[ "${PURITY_SHOW_PULUMI:-0}" == "1" && -n "${_purity_user_set_show[pulumi]}" ]]; then
-		_purity_show_cloud=1
-	fi
+	[[ -n "${_purity_preset_defaults[${preset}:_purity_git_style]:-}" ]] || preset="balanced"
+	local key
+	for key in ${(k)_purity_preset_defaults}; do
+		[[ "$key" == "${preset}:"* ]] && typeset -g "${key#${preset}:}"="${_purity_preset_defaults[$key]}"
+	done
+	# Re-apply explicit PURITY_SHOW_* overrides (only for vars user explicitly set)
+	[[ -n "${_purity_user_set_show[docker]:-}"     ]] && _purity_show_docker="${PURITY_SHOW_DOCKER}"
+	[[ -n "${_purity_user_set_show[kubernetes]:-}" ]] && _purity_show_cloud="${PURITY_SHOW_KUBERNETES}"
+	local _rv _k _V
+	for _rv in node:NODE ruby:RUBY python_version:PYTHON_VERSION go:GO rust:RUST java:JAVA php:PHP; do
+		_k="${_rv%%:*}"; _V="PURITY_SHOW_${_rv#*:}"
+		[[ "${(P)_V:-0}" == "1" && -n "${_purity_user_set_show[$_k]:-}" ]] && { _purity_show_runtimes=1; break }
+	done
+	for _rv in aws:AWS gcp:GCP azure:AZURE terraform:TERRAFORM pulumi:PULUMI; do
+		_k="${_rv%%:*}"; _V="PURITY_SHOW_${_rv#*:}"
+		[[ "${(P)_V:-0}" == "1" && -n "${_purity_user_set_show[$_k]:-}" ]] && { _purity_show_cloud=1; break }
+	done
+	return 0
 }
 
 # ================================================================================================
