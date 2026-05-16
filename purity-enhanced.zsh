@@ -799,6 +799,14 @@ prompt_purity_enhanced_cache_invalidate() {
 	rm -f "$cache_file" 2>/dev/null
 }
 
+# Invalidate both generated and legacy cache keys if stale; no-op if fresh.
+# Usage: _purity_maybe_invalidate_cache "context_type"
+_purity_maybe_invalidate_cache() {
+	prompt_purity_enhanced_should_invalidate_cache "$1" || return 0
+	prompt_purity_enhanced_cache_invalidate "$(prompt_purity_enhanced_generate_cache_key "$1")"
+	prompt_purity_enhanced_cache_invalidate "$1"
+}
+
 # Cleanup old cache files
 # Usage: prompt_purity_enhanced_cache_cleanup
 prompt_purity_enhanced_cache_cleanup() {
@@ -1172,7 +1180,6 @@ prompt_purity_enhanced_async_context() {
 
 	local output=()
 	local context_output=""
-	local cache_key=""
 
 	# Tag output with PWD so callback can reject stale results
 	output+=("pwd:$PWD")
@@ -1186,11 +1193,7 @@ prompt_purity_enhanced_async_context() {
 	fi
 
 	if [[ "${_purity_show_cloud:-1}" == "1" ]] && (( ${PURITY_ASYNC_K8S:-1} )); then
-		if prompt_purity_enhanced_should_invalidate_cache "k8s"; then
-			cache_key="$(prompt_purity_enhanced_generate_cache_key "k8s")"
-			prompt_purity_enhanced_cache_invalidate "$cache_key"
-			prompt_purity_enhanced_cache_invalidate "k8s"
-		fi
+		_purity_maybe_invalidate_cache "k8s"
 		context_output=$(prompt_purity_enhanced_async_k8s_context)
 		[[ -n "$context_output" ]] && output+=("k8s:$context_output")
 	fi
@@ -1199,21 +1202,13 @@ prompt_purity_enhanced_async_context() {
 	# This eliminates the one-prompt delay for language indicators after cd.
 
 	if [[ "${_purity_show_cloud:-1}" == "1" ]] && (( ${PURITY_ASYNC_CLOUD:-1} )); then
-		if prompt_purity_enhanced_should_invalidate_cache "cloud"; then
-			cache_key="$(prompt_purity_enhanced_generate_cache_key "cloud")"
-			prompt_purity_enhanced_cache_invalidate "$cache_key"
-			prompt_purity_enhanced_cache_invalidate "cloud"
-		fi
+		_purity_maybe_invalidate_cache "cloud"
 		context_output=$(prompt_purity_enhanced_async_cloud_info)
 		[[ -n "$context_output" ]] && output+=("cloud:$context_output")
 	fi
 
 	if [[ "${_purity_show_cloud:-1}" == "1" ]] && (( ${PURITY_ASYNC_INFRA:-1} )); then
-		if prompt_purity_enhanced_should_invalidate_cache "infra"; then
-			cache_key="$(prompt_purity_enhanced_generate_cache_key "infra")"
-			prompt_purity_enhanced_cache_invalidate "$cache_key"
-			prompt_purity_enhanced_cache_invalidate "infra"
-		fi
+		_purity_maybe_invalidate_cache "infra"
 		context_output=$(prompt_purity_enhanced_async_infra_info)
 		[[ -n "$context_output" ]] && output+=("infra:$context_output")
 	fi
@@ -1695,97 +1690,79 @@ prompt_purity_enhanced_build_context_line() {
 # COMPREHENSIVE CACHE INVALIDATION SYSTEM
 # ================================================================================================
 
-# Check if cache should be invalidated based on file changes - Enhanced version
+# Per-context file/dir watch lists — referenced via ${(@P)_purity_cache_watch_TYPE}
+typeset -ga _purity_cache_watch_languages=(
+	package.json package-lock.json yarn.lock pnpm-lock.yaml Gemfile Gemfile.lock .ruby-version
+	pyproject.toml requirements.txt setup.py Pipfile Pipfile.lock .python-version
+	go.mod go.sum .go-version Cargo.toml Cargo.lock rust-toolchain rust-toolchain.toml
+	pom.xml build.gradle build.gradle.kts gradle.properties composer.json composer.lock .php-version
+	.nvmrc .node-version settings.gradle settings.gradle.kts build.sbt project/build.properties
+	stack.yaml package.yaml '*.cabal' Dockerfile '*.dockerfile')
+typeset -ga _purity_cache_watch_cloud=(
+	"$HOME/.config/gcloud/configurations/config_default" "$HOME/.config/gcloud/active_config"
+	"$HOME/.config/gcloud/application_default_credentials.json"
+	"$HOME/.azure/azureProfile.json" "$HOME/.azure/clouds.config" "$HOME/.azure/config"
+	"$HOME/.aws/config" "$HOME/.aws/credentials" "$HOME/.aws/cli/cache")
+typeset -ga _purity_cache_watch_infra=(
+	'*.tf' '*.tfvars' .terraform/environment terraform.tfstate terraform.tfstate.backup .terraform.lock.hcl
+	terraform.tfvars terraform.tfvars.json Pulumi.yaml 'Pulumi.*.yaml' pulumi.json 'Pulumi.*.json'
+	ansible.cfg inventory inventory.ini inventory.yml inventory.yaml playbook.yml playbook.yaml
+	site.yml site.yaml template.json template.yaml template.yml '*.template'
+	cdk.json cdk.yaml cdk.yml cdk.context.json
+	Chart.yaml Chart.yml values.yaml values.yml requirements.yaml requirements.yml)
+typeset -ga _purity_cache_dirs_infra=(.terraform pulumi .pulumi ansible roles group_vars host_vars)
+
+# Unified file/glob/dir staleness checker — used by prompt_purity_enhanced_should_invalidate_cache.
+# Usage: _purity_cache_files_stale cache_file legacy_cache_file file...
+# Returns 0 (stale) if any watched entry has changed; 1 (fresh) otherwise.
+_purity_cache_files_stale() {
+	local cf="$1" lf="$2"; shift 2
+	local file ef newest
+	for file; do
+		if [[ "$file" == *"*"* ]]; then
+			for ef in $file(N); do
+				[[ -f "$ef" ]] || continue
+				prompt_purity_enhanced_file_changed "$ef" "$cf" && return 0
+				prompt_purity_enhanced_file_changed "$ef" "$lf" && return 0
+			done
+		elif [[ -d "$file" ]]; then
+			newest="$(find "$file" -type f -exec ls -t {} + 2>/dev/null | head -n1)"
+			[[ -n "$newest" ]] || continue
+			prompt_purity_enhanced_file_changed "$newest" "$cf" && return 0
+			prompt_purity_enhanced_file_changed "$newest" "$lf" && return 0
+		elif [[ -f "$file" ]]; then
+			prompt_purity_enhanced_file_changed "$file" "$cf" && return 0
+			prompt_purity_enhanced_file_changed "$file" "$lf" && return 0
+		fi
+	done
+	return 1
+}
+
 prompt_purity_enhanced_should_invalidate_cache() {
 	local context_type="$1"
 	local cache_key="$(prompt_purity_enhanced_generate_cache_key "$context_type")"
 	local cache_file="$PURITY_CACHE_DIR/${cache_key}.cache"
-	
-	# Also check legacy cache file for backwards compatibility
 	local legacy_cache_file="$PURITY_CACHE_DIR/${context_type}.cache"
-	
-	case $context_type in
 
+	# Check per-type file watches via indirect array reference
+	local arr_name="_purity_cache_watch_${context_type}"
+	local -a watch_files=("${(@P)arr_name}")
+	[[ ${#watch_files[@]} -gt 0 ]] &&
+		_purity_cache_files_stale "$cache_file" "$legacy_cache_file" "${watch_files[@]}" && return 0
+
+	case $context_type in
 		k8s)
-			# Invalidate if kubeconfig changed
 			local kubeconfig="${KUBECONFIG:-$HOME/.kube/config}"
-			[[ -f "$kubeconfig" ]] && {
-				prompt_purity_enhanced_file_changed "$kubeconfig" "$cache_file" && return 0
-				prompt_purity_enhanced_file_changed "$kubeconfig" "$legacy_cache_file" && return 0
-			}
-			# Check for context switches via environment variables
-			local kube_env_key="k8s-context-env-${KUBECONFIG:-default}-${KUBE_NAMESPACE:-default}"
-			local cached_env="$(prompt_purity_enhanced_cache_get "$kube_env_key" 60 2>/dev/null)"
+			_purity_cache_files_stale "$cache_file" "$legacy_cache_file" "$kubeconfig" && return 0
+			local env_key="k8s-context-env-${KUBECONFIG:-default}-${KUBE_NAMESPACE:-default}"
+			local cached_env="$(prompt_purity_enhanced_cache_get "$env_key" 60 2>/dev/null)"
 			local current_env="${KUBECONFIG:-default}-${KUBE_NAMESPACE:-default}"
 			if [[ "$cached_env" != "$current_env" ]]; then
-				prompt_purity_enhanced_cache_set "$kube_env_key" "$current_env"
+				prompt_purity_enhanced_cache_set "$env_key" "$current_env"
 				return 0
 			fi
 			;;
-		languages)
-			# Invalidate if project files changed - Comprehensive language file detection
-			local lang_files=("package.json" "package-lock.json" "yarn.lock" "pnpm-lock.yaml"  # Node.js
-			                  "Gemfile" "Gemfile.lock" ".ruby-version"                        # Ruby
-			                  "pyproject.toml" "requirements.txt" "setup.py" "Pipfile" "Pipfile.lock" ".python-version" # Python
-			                  "go.mod" "go.sum" ".go-version"                               # Go
-			                  "Cargo.toml" "Cargo.lock" "rust-toolchain" "rust-toolchain.toml" # Rust
-			                  "pom.xml" "build.gradle" "build.gradle.kts" "gradle.properties"  # Java/JVM
-			                  "composer.json" "composer.lock" ".php-version"                 # PHP
-			                  ".nvmrc" ".node-version"                                       # Node version files
-			                  "settings.gradle" "settings.gradle.kts"                       # More Gradle files
-			                  "build.sbt" "project/build.properties"                        # Scala/SBT
-			                  "stack.yaml" "package.yaml" "*.cabal"                         # Haskell
-			                  "Dockerfile" "*.dockerfile"                                   # Docker files affecting runtime
-			                  )
-			for file in $lang_files; do
-				# Handle glob patterns
-				if [[ "$file" == *"*"* ]]; then
-					for expanded_file in $file(N); do
-						[[ -f "$expanded_file" ]] && {
-							prompt_purity_enhanced_file_changed "$expanded_file" "$cache_file" && return 0
-							prompt_purity_enhanced_file_changed "$expanded_file" "$legacy_cache_file" && return 0
-						}
-					done
-				else
-					[[ -f "$file" ]] && {
-						prompt_purity_enhanced_file_changed "$file" "$cache_file" && return 0
-						prompt_purity_enhanced_file_changed "$file" "$legacy_cache_file" && return 0
-					}
-				fi
-			done
-			;;
 		cloud)
-			# Invalidate if cloud config files changed - Enhanced cloud detection
-			local cloud_configs=(
-				# Google Cloud
-				"$HOME/.config/gcloud/configurations/config_default" 
-				"$HOME/.config/gcloud/active_config" 
-				"$HOME/.config/gcloud/application_default_credentials.json"
-				# Azure
-				"$HOME/.azure/azureProfile.json" 
-				"$HOME/.azure/clouds.config" 
-				"$HOME/.azure/config"
-				# AWS
-				"$HOME/.aws/config" 
-				"$HOME/.aws/credentials" 
-				"$HOME/.aws/cli/cache"  # AWS CLI cache
-				)
-			for file in $cloud_configs; do
-				# Handle directory case (like AWS cache)
-				if [[ -d "$file" ]]; then
-					local newest_file="$(find "$file" -type f -name "*" -exec ls -t {} + 2>/dev/null | head -n1)"
-					[[ -n "$newest_file" ]] && {
-						prompt_purity_enhanced_file_changed "$newest_file" "$cache_file" && return 0
-						prompt_purity_enhanced_file_changed "$newest_file" "$legacy_cache_file" && return 0
-					}
-				else
-					[[ -f "$file" ]] && {
-						prompt_purity_enhanced_file_changed "$file" "$cache_file" && return 0
-						prompt_purity_enhanced_file_changed "$file" "$legacy_cache_file" && return 0
-					}
-				fi
-			done
-			# Check for environment variable changes
 			local cloud_env_key="cloud-env-${AWS_PROFILE:-default}-${GCLOUD_PROJECT:-default}-${AZURE_SUBSCRIPTION_ID:-default}"
 			local cached_cloud_env="$(prompt_purity_enhanced_cache_get "$cloud_env_key" 60 2>/dev/null)"
 			local current_cloud_env="${AWS_PROFILE:-default}-${GCLOUD_PROJECT:-default}-${AZURE_SUBSCRIPTION_ID:-default}"
@@ -1795,50 +1772,7 @@ prompt_purity_enhanced_should_invalidate_cache() {
 			fi
 			;;
 		infra)
-			# Invalidate if infrastructure config files changed - Enhanced infra detection
-			local infra_files=(
-				# Terraform
-				"*.tf" "*.tfvars" ".terraform/environment" "terraform.tfstate" "terraform.tfstate.backup"
-				".terraform.lock.hcl" "terraform.tfvars" "terraform.tfvars.json"
-				# Pulumi
-				"Pulumi.yaml" "Pulumi.*.yaml" "pulumi.json" "Pulumi.*.json"
-				# Ansible
-				"ansible.cfg" "inventory" "inventory.ini" "inventory.yml" "inventory.yaml"
-				"playbook.yml" "playbook.yaml" "site.yml" "site.yaml"
-				# CloudFormation
-				"template.json" "template.yaml" "template.yml" "*.template"
-				# CDK
-				"cdk.json" "cdk.yaml" "cdk.yml" "cdk.context.json"
-				# Helm
-				"Chart.yaml" "Chart.yml" "values.yaml" "values.yml" "requirements.yaml" "requirements.yml"
-				)
-			for file in $infra_files; do
-				# Handle glob patterns
-				if [[ "$file" == *"*"* ]]; then
-					for expanded_file in $file(N); do
-						[[ -f "$expanded_file" ]] && {
-							prompt_purity_enhanced_file_changed "$expanded_file" "$cache_file" && return 0
-							prompt_purity_enhanced_file_changed "$expanded_file" "$legacy_cache_file" && return 0
-						}
-					done
-				else
-					[[ -f "$file" ]] && {
-						prompt_purity_enhanced_file_changed "$file" "$cache_file" && return 0
-						prompt_purity_enhanced_file_changed "$file" "$legacy_cache_file" && return 0
-					}
-				fi
-			done
-			# Check for directory-based changes
-			local infra_dirs=(".terraform" "pulumi" ".pulumi" "ansible" "roles" "group_vars" "host_vars")
-			for dir in $infra_dirs; do
-				if [[ -d "$dir" ]]; then
-					local newest_file="$(find "$dir" -type f \( -name "*.tf" -o -name "*.yaml" -o -name "*.yml" -o -name "*.json" \) -exec ls -t {} + 2>/dev/null | head -n1)"
-					[[ -n "$newest_file" ]] && {
-						prompt_purity_enhanced_file_changed "$newest_file" "$cache_file" && return 0
-						prompt_purity_enhanced_file_changed "$newest_file" "$legacy_cache_file" && return 0
-					}
-				fi
-			done
+			_purity_cache_files_stale "$cache_file" "$legacy_cache_file" "${_purity_cache_dirs_infra[@]}" && return 0
 			;;
 	esac
 	return 1
