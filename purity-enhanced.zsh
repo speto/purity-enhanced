@@ -480,13 +480,6 @@ typeset -gA _purity_user_set_show
 : ${PURITY_CACHE_TTL_MEDIUM:=60}         # Medium operations (Docker, K8s) - 1 minute  
 : ${PURITY_CACHE_TTL_SLOW:=30}           # Slow operations (cloud services) - 30 seconds
 
-# Backwards compatibility - Legacy TTL configuration
-: ${PURITY_CACHE_TTL_DOCKER:=${PURITY_CACHE_TTL_MEDIUM}}        
-: ${PURITY_CACHE_TTL_K8S:=${PURITY_CACHE_TTL_MEDIUM}}           
-: ${PURITY_CACHE_TTL_LANGUAGES:=${PURITY_CACHE_TTL_FAST}}       
-: ${PURITY_CACHE_TTL_CLOUD:=${PURITY_CACHE_TTL_SLOW}}          
-: ${PURITY_CACHE_TTL_INFRA:=${PURITY_CACHE_TTL_SLOW}}
-
 # Async behavior configuration
 : ${PURITY_ASYNC_DOCKER:=1}             # Enable async Docker operations
 : ${PURITY_ASYNC_K8S:=1}                # Enable async Kubernetes operations
@@ -914,34 +907,6 @@ prompt_purity_enhanced_file_changed() {
 	[[ "$watch_file" -nt "$cache_file" ]]
 }
 
-# Get cached context or return empty if invalid - Enhanced with smart keys
-prompt_purity_enhanced_get_cached_context() {
-	local context_type="$1"
-	local cache_key="$(prompt_purity_enhanced_generate_cache_key "$context_type")"
-	
-	# Try smart key first, fallback to legacy key for backwards compatibility
-	local cached_result
-	cached_result="$(prompt_purity_enhanced_cache_get "$cache_key" 2>/dev/null)" || \
-	cached_result="$(prompt_purity_enhanced_cache_get "$context_type" 2>/dev/null)"
-	
-	if [[ -n "$cached_result" ]]; then
-		echo "$cached_result"
-		return 0
-	fi
-	return 1
-}
-
-# Set cached context - Enhanced with smart keys
-prompt_purity_enhanced_set_cached_context() {
-	local context_type="$1"
-	local content="$2"
-	local cache_key="$(prompt_purity_enhanced_generate_cache_key "$context_type")"
-	
-	# Set both smart key and legacy key for transition period
-	prompt_purity_enhanced_cache_set "$cache_key" "$content"
-	prompt_purity_enhanced_cache_set "$context_type" "$content"  # Legacy fallback
-}
-
 # Check if async is available
 prompt_purity_enhanced_async_available() {
 	# Check if async is loaded and available (async should be initialized in setup)
@@ -1357,9 +1322,7 @@ prompt_purity_enhanced_async_k8s_context() {
 		result="k8s:none"
 	fi
 	
-	# Cache result using both smart key and legacy key
 	prompt_purity_enhanced_cache_set "$cache_key" "$result"
-	
 	
 	[[ "$result" != "k8s:none" && "$result" != "k8s:timeout" ]] && echo "$result"
 }
