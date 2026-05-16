@@ -18,6 +18,9 @@
 
 # Ensure prompt substitution is enabled (required for functions in prompt)
 setopt promptsubst
+# Capture plugin directory at source time (${(%):-%x} gives path of this file)
+typeset -g _purity_plugin_dir="${${(%):-%x}:h}"
+
 
 # Performance options
 PURE_GIT_UNTRACKED_DIRTY=${PURE_GIT_UNTRACKED_DIRTY:-1}
@@ -1950,6 +1953,50 @@ prompt_purity_git_status() {
 	return 0
 }
 
+# ================================================================================================
+# GITSTATUSD INTEGRATION
+# ================================================================================================
+
+# Global: 1 if gitstatusd daemon started successfully, 0 otherwise
+typeset -g _purity_gitstatusd_available=0
+
+# Discover the gitstatusd binary via: env override → PATH → cached download → not found
+_purity_gitstatusd_find_bin() {
+	# 1. Explicit override
+	[[ -n "${PURITY_GITSTATUSD_BIN:-}" && -x "$PURITY_GITSTATUSD_BIN" ]] && { echo "$PURITY_GITSTATUSD_BIN"; return 0 }
+	# 2. On PATH
+	command -v gitstatusd &>/dev/null && { echo "$(command -v gitstatusd)"; return 0 }
+	# 3. Cached download location
+	local cached="$HOME/.cache/purity-enhanced/gitstatusd"
+	[[ -x "$cached" ]] && { echo "$cached"; return 0 }
+	# 4. Not found — caller falls back to zsh-async git path
+	return 1
+}
+
+# Start the gitstatusd daemon using the vendored gitstatus.plugin.zsh binding
+_purity_gitstatusd_start() {
+	[[ "${PURITY_USE_GITSTATUSD:-1}" == "0" ]] && return 1
+	local bin
+	bin=$(_purity_gitstatusd_find_bin) || return 1
+	# Source the zsh binding if not already loaded
+	local plugin="${_purity_plugin_dir}/vendor/gitstatus/gitstatus.plugin.zsh"
+	[[ -f "$plugin" ]] || return 1
+	(( $+functions[gitstatus_start] )) || source "$plugin"
+	# Point gitstatus at our discovered binary
+	GITSTATUS_DAEMON="$bin"
+	# Start daemon: unlimited counts for all categories
+	gitstatus_start -s -1 -u -1 -c -1 -d -1 PURITY_ENHANCED || return 1
+	_purity_gitstatusd_available=1
+}
+
+# Stop the gitstatusd daemon (called on zshexit)
+_purity_gitstatusd_stop() {
+	[[ "${_purity_gitstatusd_available:-0}" == "1" ]] || return 0
+	gitstatus_stop PURITY_ENHANCED 2>/dev/null || true
+	_purity_gitstatusd_available=0
+}
+
+
 # Build color lookup table once at setup time (reads zstyle; all render fns use _purity_colors[key])
 _purity_init_colors() {
 	typeset -gA _purity_colors=(
@@ -2135,6 +2182,9 @@ prompt_purity_enhanced_setup() {
 			async_stop_worker "prompt_purity_enhanced"
 		fi
 		
+		# Stop gitstatusd daemon if running
+		_purity_gitstatusd_stop
+		
 		# Cleanup cache files on exit
 		prompt_purity_enhanced_cache_cleanup
 		
@@ -2154,6 +2204,9 @@ prompt_purity_enhanced_setup() {
 
 	# Build color lookup table once (reads zstyle; all render functions use _purity_colors[key])
 	_purity_init_colors
+	# Start gitstatusd daemon (no-op if binary not found or PURITY_USE_GITSTATUSD=0)
+	_purity_gitstatusd_start 2>/dev/null || true
+
 
 	# show username@host if logged in through SSH or in a container
 	if [[ -n "$SSH_CONNECTION" ]] || [[ -f /.dockerenv ]] || [[ -n "$KUBERNETES_SERVICE_HOST" ]]; then
