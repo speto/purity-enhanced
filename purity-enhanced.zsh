@@ -236,6 +236,85 @@ _purity_has_azure_config() {
 	return 1
 }
 
+# Cloud/infra per-provider detect helpers. Each prints the display value on stdout;
+# exits 1 / prints nothing on miss. $1 = cache_key (for GCP/Azure timeout caching).
+
+_purity_cloud_detect_aws() {
+	[[ -n "${AWS_PROFILE:-}" ]] && echo "$AWS_PROFILE"
+}
+
+_purity_cloud_detect_gcp() {
+	local cache_key="${1:-}"
+	command -v gcloud &>/dev/null && _purity_has_gcp_config || return 1
+	local p
+	if [[ -n "${CLOUDSDK_CORE_PROJECT:-}" ]]; then
+		p="${CLOUDSDK_CORE_PROJECT}"
+	elif [[ -n "${GCLOUD_PROJECT:-}" ]]; then
+		p="${GCLOUD_PROJECT}"
+	else
+		p=$(_purity_timeout 2 gcloud config get-value project 2>/dev/null)
+		if _purity_is_timeout_exit "$?"; then
+			[[ -n "$cache_key" ]] && prompt_purity_enhanced_cache_set "gcp-timeout-${cache_key}" "timeout" 30
+			return 1
+		fi
+		[[ -z "$p" || "$p" == "(unset)" ]] && return 1
+	fi
+	echo "$p"
+}
+
+_purity_cloud_detect_azure() {
+	local cache_key="${1:-}"
+	command -v az &>/dev/null && _purity_has_azure_config || return 1
+	local azure_timeout_key="azure-timeout-${cache_key}"
+	[[ -n "$cache_key" ]] && prompt_purity_enhanced_cache_get "$azure_timeout_key" 30 &>/dev/null && return 1
+	local sub=$(_purity_timeout 2 az account show --query name -o tsv 2>/dev/null)
+	if _purity_is_timeout_exit "$?"; then
+		[[ -n "$cache_key" ]] && prompt_purity_enhanced_cache_set "$azure_timeout_key" "timeout" 30
+		return 1
+	fi
+	[[ -z "$sub" ]] && return 1
+	[[ ${#sub} -gt 20 ]] && sub="${sub:0:17}..."
+	echo "$sub"
+}
+
+_purity_cloud_detect_terraform() {
+	[[ -f *.tf(#qN) ]] && command -v terraform &>/dev/null || return 1
+	local w
+	if [[ -f .terraform/environment ]]; then
+		w="$(cat .terraform/environment 2>/dev/null)"
+	else
+		w=$(_purity_timeout 2 terraform workspace show 2>/dev/null)
+	fi
+	[[ -n "$w" && "$w" != "default" ]] && echo "$w"
+}
+
+_purity_cloud_detect_pulumi() {
+	([[ -f Pulumi.yaml ]] || [[ -f Pulumi.yml ]]) && command -v pulumi &>/dev/null || return 1
+	local s
+	local pulumi_files=(Pulumi.*.yaml Pulumi.*.yml)
+	for f in $pulumi_files(N); do
+		s="${f#Pulumi.}"; s="${s%.yaml}"; s="${s%.yml}"; break
+	done
+	[[ -z "$s" ]] && s=$(_purity_timeout 2 pulumi stack --show-name 2>/dev/null)
+	[[ -n "$s" ]] && echo "$s"
+}
+
+# Dispatch: check show-toggle then call the per-provider detect helper.
+_purity_cloud_detect_segment() {
+	local key="$1" cache_key="${2:-}"
+	local sv_name="${_purity_cloud_show_var[$key]}"
+	local sv_val="${(P)sv_name}"
+	[[ "${sv_val:-1}" == "0" ]] && return 1
+	_purity_cloud_detect_${key} "$cache_key"
+}
+
+typeset -ga _purity_cloud_keys=(aws gcp azure terraform pulumi)
+typeset -gA _purity_cloud_show_var=(
+	[aws]=PURITY_SHOW_AWS [gcp]=PURITY_SHOW_GCP [azure]=PURITY_SHOW_AZURE
+	[terraform]=PURITY_SHOW_TERRAFORM [pulumi]=PURITY_SHOW_PULUMI
+)
+typeset -gA _purity_cloud_emoji=([aws]="☁" [gcp]="☁️" [azure]="🌐" [terraform]="🏗️" [pulumi]="📦")
+
 # Portable timeout wrapper.
 # Usage: _purity_timeout <seconds> <command> [args...]
 #
@@ -1329,136 +1408,45 @@ prompt_purity_enhanced_async_language_versions() {
 	[[ -n "$result" && "$result" != "languages:none" ]] && echo "$result"
 }
 
-# Async cloud service operations - Enhanced with aggressive caching for slow operations
+# Async cloud service operations — AWS, GCP, Azure
 prompt_purity_enhanced_async_cloud_info() {
-	local result=""
-
 	[[ "${_purity_show_cloud:-1}" == "0" ]] && return
-	
-	# Generate smart cache key including cloud environment variables
+
 	local cache_key="$(prompt_purity_enhanced_generate_cache_key "cloud")"
-	
-	# Check cache first with fast return - cloud operations are VERY slow
 	local cached_result
 	if cached_result="$(prompt_purity_enhanced_cache_get "$cache_key" "${PURITY_CACHE_TTL_SLOW}" 2>/dev/null)" && [[ -n "$cached_result" ]]; then
 		echo "$cached_result"
 		return
 	fi
-	
-	# AWS profile (fast, from environment variable - check first)
-	if [[ "${PURITY_SHOW_AWS:-1}" != "0" ]] && [[ -n "${AWS_PROFILE:-}" ]]; then
-		result+="aws:${AWS_PROFILE} "
-	fi
-	
-	# Google Cloud project (VERY slow, aggressive timeout)
-	if [[ "${PURITY_SHOW_GCP:-1}" != "0" ]] && command -v gcloud &>/dev/null && _purity_has_gcp_config; then
-		# Check if we have a cached GCP project from environment first
-		if [[ -n "${CLOUDSDK_CORE_PROJECT:-}" ]]; then
-			result+="gcp:${CLOUDSDK_CORE_PROJECT} "
-		elif [[ -n "${GCLOUD_PROJECT:-}" ]]; then
-			result+="gcp:${GCLOUD_PROJECT} "
-		else
-			local gcp_project
-			# Reduce timeout from 5s to 2s for better responsiveness
-			gcp_project=$(_purity_timeout 2 gcloud config get-value project 2>/dev/null)
-			local gcloud_exit=$?
-			if _purity_is_timeout_exit "$gcloud_exit"; then
-				# Timeout - cache this state to avoid repeated slow calls
-				prompt_purity_enhanced_cache_set "gcp-timeout-${cache_key}" "timeout" 30
-			elif [[ -n "$gcp_project" && "$gcp_project" != "(unset)" ]]; then
-				result+="gcp:${gcp_project} "
-			fi
-		fi
-	fi
-	
-	# Azure subscription (EXTREMELY slow, very aggressive timeout)
-	if [[ "${PURITY_SHOW_AZURE:-1}" != "0" ]] && command -v az &>/dev/null && _purity_has_azure_config; then
-		# Check for cached timeout state first
-		local azure_timeout_key="azure-timeout-${cache_key}"
-		if ! prompt_purity_enhanced_cache_get "$azure_timeout_key" 30 &>/dev/null; then
-			local azure_sub
-			# Reduce timeout from 5s to 2s for better responsiveness
-			azure_sub=$(_purity_timeout 2 az account show --query name -o tsv 2>/dev/null)
-			local az_exit=$?
-			if _purity_is_timeout_exit "$az_exit"; then
-				# Timeout - cache this state to avoid repeated slow calls
-				prompt_purity_enhanced_cache_set "$azure_timeout_key" "timeout" 30
-			elif [[ -n "$azure_sub" ]]; then
-				# Truncate long subscription names for display
-				local short_sub="${azure_sub}"
-				[[ ${#short_sub} -gt 20 ]] && short_sub="${short_sub:0:17}..."
-				result+="azure:${short_sub} "
-			fi
-		fi
-	fi
-	
-	# Remove trailing space
+
+	local result="" v
+	for key in aws gcp azure; do
+		v="$(_purity_cloud_detect_segment "$key" "$cache_key")" && result+="${key}:${v} "
+	done
 	result="${result% }"
-	
-	# Cache result using both smart key and legacy key (even if empty to prevent repeated calls)
+
 	prompt_purity_enhanced_cache_set "$cache_key" "${result:-cloud:none}"
-	
-	
 	[[ -n "$result" && "$result" != "cloud:none" ]] && echo "$result"
 }
 
-# Async infrastructure tools operations - Enhanced with file-based hints and caching
+# Async infrastructure tools — Terraform, Pulumi
 prompt_purity_enhanced_async_infra_info() {
-	local result=""
-
 	[[ "${_purity_show_cloud:-1}" == "0" ]] && return
-	
-	# Generate smart cache key per project directory
+
 	local cache_key="$(prompt_purity_enhanced_generate_cache_key "infra")"
-	
-	# Check cache first
 	local cached_result
 	if cached_result="$(prompt_purity_enhanced_cache_get "$cache_key" "${PURITY_CACHE_TTL_SLOW}" 2>/dev/null)" && [[ -n "$cached_result" ]]; then
 		echo "$cached_result"
 		return
 	fi
-	
-	# Terraform workspace - check file hints first
-	if [[ "${PURITY_SHOW_TERRAFORM:-1}" != "0" ]] && [[ -f *.tf(#qN) ]] && command -v terraform &>/dev/null; then
-		local tf_workspace
-		# Try to read workspace from .terraform/environment file first (faster)
-		if [[ -f .terraform/environment ]]; then
-			tf_workspace="$(cat .terraform/environment 2>/dev/null)"
-		else
-			# Fallback to terraform command with shorter timeout
-			tf_workspace=$(_purity_timeout 2 terraform workspace show 2>/dev/null)
-		fi
-		[[ -n "$tf_workspace" && "$tf_workspace" != "default" ]] && result+="terraform:${tf_workspace} "
-	fi
-	
-	# Pulumi stack - check file hints first
-	if [[ "${PURITY_SHOW_PULUMI:-1}" != "0" ]] && ([[ -f Pulumi.yaml ]] || [[ -f Pulumi.yml ]]) && command -v pulumi &>/dev/null; then
-		local pulumi_stack
-		# Try to extract stack from Pulumi files first (faster)
-		local pulumi_files=(Pulumi.*.yaml Pulumi.*.yml)
-		for file in $pulumi_files(N); do
-			if [[ -f "$file" ]]; then
-				# Extract stack name from filename (Pulumi.dev.yaml -> dev)
-				pulumi_stack="${file#Pulumi.}"
-				pulumi_stack="${pulumi_stack%.yaml}"
-				pulumi_stack="${pulumi_stack%.yml}"
-				break
-			fi
-		done
-		if [[ -z "$pulumi_stack" ]]; then
-			# Fallback to pulumi command with shorter timeout
-			pulumi_stack=$(_purity_timeout 2 pulumi stack --show-name 2>/dev/null)
-		fi
-		[[ -n "$pulumi_stack" ]] && result+="pulumi:${pulumi_stack} "
-	fi
-	
-	# Remove trailing space
+
+	local result="" v
+	for key in terraform pulumi; do
+		v="$(_purity_cloud_detect_segment "$key")" && result+="${key}:${v} "
+	done
 	result="${result% }"
-	
-	# Cache result using both smart key and legacy key (even if empty to prevent repeated calls)
+
 	prompt_purity_enhanced_cache_set "$cache_key" "${result:-infra:none}"
-	
-	
 	[[ -n "$result" && "$result" != "infra:none" ]] && echo "$result"
 }
 
@@ -1683,49 +1671,20 @@ prompt_purity_enhanced_build_context_line() {
 		}
 	fi
 	
-	# Parse and display cloud info from async state
-	if [[ "${_purity_show_cloud:-1}" != "0" ]] && [[ -n ${prompt_purity_enhanced_context_info[cloud]} ]]; then
-		local cloud_info="${prompt_purity_enhanced_context_info[cloud]}"
-		local -A cloud_services
-		
-		# Parse cloud info (format: "gcp:my-project azure:my-sub aws:my-profile")
-		for item in ${(z)cloud_info}; do
-			if [[ $item =~ "([^:]+):(.+)" ]]; then
-				cloud_services[${match[1]}]="${match[2]}"
-			fi
+	# Parse and display cloud/infra info from async state
+	if [[ "${_purity_show_cloud:-1}" != "0" ]]; then
+		local -A _cloud_all
+		local _ci
+		for _ci in ${(z)${prompt_purity_enhanced_context_info[cloud]:-}} \
+		            ${(z)${prompt_purity_enhanced_context_info[infra]:-}}; do
+			[[ $_ci =~ "([^:]+):(.+)" ]] && _cloud_all[${match[1]}]="${match[2]}"
 		done
-		
-		# Display each cloud service
-		[[ "${PURITY_SHOW_AWS:-1}" != "0" ]] && [[ -n ${cloud_services[aws]} ]] && {
-			context_items+=("%F{${_purity_colors[aws]}}☁ ${cloud_services[aws]}%f")
-		}
-		[[ "${PURITY_SHOW_GCP:-1}" != "0" ]] && [[ -n ${cloud_services[gcp]} ]] && {
-			context_items+=("%F{${_purity_colors[gcp]}}☁️ ${cloud_services[gcp]}%f")
-		}
-		[[ "${PURITY_SHOW_AZURE:-1}" != "0" ]] && [[ -n ${cloud_services[azure]} ]] && {
-			context_items+=("%F{${_purity_colors[azure]}}🌐 ${cloud_services[azure]}%f")
-		}
-	fi
-	
-	# Parse and display infrastructure info from async state
-	if [[ "${_purity_show_cloud:-1}" != "0" ]] && [[ -n ${prompt_purity_enhanced_context_info[infra]} ]]; then
-		local infra_info="${prompt_purity_enhanced_context_info[infra]}"
-		local -A infra_tools
-		
-		# Parse infra info (format: "terraform:dev pulumi:prod")
-		for item in ${(z)infra_info}; do
-			if [[ $item =~ "([^:]+):(.+)" ]]; then
-				infra_tools[${match[1]}]="${match[2]}"
-			fi
+		for key in $_purity_cloud_keys; do
+			local sv_name="${_purity_cloud_show_var[$key]}"
+			local sv_val="${(P)sv_name}"
+			[[ "${sv_val:-1}" != "0" ]] && [[ -n "${_cloud_all[$key]}" ]] && \
+				context_items+=("%F{${_purity_colors[$key]}}${_purity_cloud_emoji[$key]} ${_cloud_all[$key]}%f")
 		done
-		
-		# Display each infrastructure tool
-		[[ "${PURITY_SHOW_TERRAFORM:-1}" != "0" ]] && [[ -n ${infra_tools[terraform]} ]] && {
-			context_items+=("%F{${_purity_colors[terraform]}}🏗️ ${infra_tools[terraform]}%f")
-		}
-		[[ "${PURITY_SHOW_PULUMI:-1}" != "0" ]] && [[ -n ${infra_tools[pulumi]} ]] && {
-			context_items+=("%F{${_purity_colors[pulumi]}}📦 ${infra_tools[pulumi]}%f")
-		}
 	fi
 	
 	# Store the built context line (no echo — this is called during async callback)
