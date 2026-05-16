@@ -480,7 +480,7 @@ typeset -gA _purity_user_set_show
 
 # Cache TTL configuration - Smart classification by operation speed
 : ${PURITY_CACHE_TTL_FAST:=300}          # Fast operations (language versions) - 5 minutes
-: ${PURITY_CACHE_TTL_MEDIUM:=60}         # Medium operations (Docker, K8s) - 1 minute  
+: ${PURITY_CACHE_TTL_MEDIUM:=30}         # Medium operations (Docker, K8s) - 30 seconds
 : ${PURITY_CACHE_TTL_SLOW:=30}           # Slow operations (cloud services) - 30 seconds
 
 # Async behavior configuration
