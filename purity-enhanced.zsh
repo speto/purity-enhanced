@@ -952,6 +952,22 @@ prompt_purity_enhanced_async_git() {
 	# Sync to caller's PWD (passed as $1 by async_tasks, or fallback to current)
 	[[ -n "${1:-}" ]] && builtin cd -q "$1" 2>/dev/null
 
+	# --- gitstatusd fast path ---
+	# When daemon is running, query it synchronously (5s timeout) instead of
+	# spawning multiple git subprocesses. Falls through on tout/error.
+	if [[ "${_purity_gitstatusd_available:-0}" == "1" ]]; then
+		if gitstatus_query -d "$PWD" -t 5 PURITY_ENHANCED 2>/dev/null; then
+			if [[ "$VCS_STATUS_RESULT" == "ok-sync" ]]; then
+				_purity_gitstatusd_fill_vcs_info "$PWD"
+				return 0
+			elif [[ "$VCS_STATUS_RESULT" == "norepo-sync" ]]; then
+				# Not a git repo — return 0 with no output; callback clears vcs_info
+				return 0
+			fi
+			# tout or error: fall through to git subprocess path
+		fi
+	fi
+
 	# Check if we're in a git repository
 	command git rev-parse --is-inside-work-tree &>/dev/null || return 0
 
@@ -1994,6 +2010,80 @@ _purity_gitstatusd_stop() {
 	[[ "${_purity_gitstatusd_available:-0}" == "1" ]] || return 0
 	gitstatus_stop PURITY_ENHANCED 2>/dev/null || true
 	_purity_gitstatusd_available=0
+}
+
+# Map VCS_STATUS_* variables to the same key:value stdout format as
+# prompt_purity_enhanced_async_git so the existing async callback can process it.
+# Must be called after a successful gitstatus_query (VCS_STATUS_* vars already set).
+_purity_gitstatusd_fill_vcs_info() {
+	local dir="${1:-$PWD}"
+
+	# Branch / detached HEAD (short commit for detached state)
+	local branch="$VCS_STATUS_LOCAL_BRANCH"
+	[[ -z "$branch" ]] && branch="${VCS_STATUS_COMMIT[1,7]}"
+
+	# Action (rebase-i, merge, cherry-pick, etc.)
+	local action="$VCS_STATUS_ACTION"
+
+	# Status counts — CRITICAL MAPPING (from P2-0 audit)
+	# ~N (modified): staged + unstaged minus new/deleted files (avoids double-counting)
+	local modified=$(( VCS_STATUS_NUM_STAGED + VCS_STATUS_NUM_UNSTAGED \
+	                   - VCS_STATUS_NUM_STAGED_NEW - VCS_STATUS_NUM_STAGED_DELETED \
+	                   - VCS_STATUS_NUM_UNSTAGED_DELETED ))
+	(( modified < 0 )) && modified=0
+	# +N (added+untracked) = staged_new + untracked
+	local added=$(( VCS_STATUS_NUM_STAGED_NEW + VCS_STATUS_NUM_UNTRACKED ))
+	# -N (deleted) = staged_deleted + unstaged_deleted
+	local deleted=$(( VCS_STATUS_NUM_STAGED_DELETED + VCS_STATUS_NUM_UNSTAGED_DELETED ))
+	# !N (conflicted)
+	local conflicted="${VCS_STATUS_NUM_CONFLICTED:-0}"
+
+	# Worktree role/name — keep subprocess (gitstatusd has no worktree-name field)
+	prompt_purity_enhanced_detect_repo_role
+	local worktree_output=""
+	if [[ "$_purity_repo_role" == "worktree" ]] && [[ -n "$_purity_worktree_name" ]]; then
+		worktree_output="$_purity_worktree_name"
+	fi
+
+	# Build status string (only include non-zero counts, same pattern as git path)
+	local STATUS=""
+	[[ $modified -gt 0 ]] && STATUS="modified:$modified $STATUS"
+	[[ $added -gt 0 ]] && STATUS="added:$added $STATUS"
+	[[ $deleted -gt 0 ]] && STATUS="deleted:$deleted $STATUS"
+	[[ $conflicted -gt 0 ]] && STATUS="conflicted:$conflicted $STATUS"
+
+	# Optional line counts — keep git subprocess (gitstatusd doesn't provide line diffs)
+	if [[ "${PURITY_GIT_SHOW_LINE_COUNTS:-0}" == "1" ]]; then
+		local total_added=0 total_deleted=0
+		local unstaged_stats staged_stats
+		unstaged_stats=$(command git -C "$dir" diff --shortstat 2>/dev/null)
+		staged_stats=$(command git -C "$dir" diff --cached --shortstat 2>/dev/null)
+		if [[ -n "$unstaged_stats" ]]; then
+			local ins=$(echo "$unstaged_stats" | grep -o '[0-9]* insertion' | awk '{print $1}')
+			local dels=$(echo "$unstaged_stats" | grep -o '[0-9]* deletion' | awk '{print $1}')
+			(( total_added += ${ins:-0} ))
+			(( total_deleted += ${dels:-0} ))
+		fi
+		if [[ -n "$staged_stats" ]]; then
+			local ins=$(echo "$staged_stats" | grep -o '[0-9]* insertion' | awk '{print $1}')
+			local dels=$(echo "$staged_stats" | grep -o '[0-9]* deletion' | awk '{print $1}')
+			(( total_added += ${ins:-0} ))
+			(( total_deleted += ${dels:-0} ))
+		fi
+		if (( total_added > 0 || total_deleted > 0 )); then
+			STATUS="lines_added:$total_added lines_deleted:$total_deleted $STATUS"
+		fi
+	fi
+
+	local status_output="${STATUS% }"
+
+	# Print key:value lines — same format the async callback parses
+	print -r -- "pwd:$dir"
+	print -r -- "top:${VCS_STATUS_WORKDIR:-$dir}"
+	print -r -- "branch:$branch"
+	print -r -- "action:$action"
+	print -r -- "worktree:$worktree_output"
+	print -r -- "status:$status_output"
 }
 
 
