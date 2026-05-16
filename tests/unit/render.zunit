@@ -37,6 +37,8 @@
 
     run prompt_purity_enhanced_git_branch_sync
     assert $state equals 0
+    [[ "$output" != " "* ]]
+    assert $? equals 0
     assert "$output" contains "⎇ "
     assert "$output" contains "%F{yellow}"
 
@@ -76,7 +78,7 @@
 
     run prompt_purity_enhanced_worktree_segment
     assert $state equals 0
-    assert "$output" same_as " %F{242}𖠰 feature-tree%f"
+    assert "$output" same_as "%F{242}𖠰 feature-tree%f"
 
     functions -c _prompt_purity_enhanced_detect_repo_role_backup prompt_purity_enhanced_detect_repo_role
     unfunction _prompt_purity_enhanced_detect_repo_role_backup
@@ -103,7 +105,7 @@
 
     run prompt_purity_enhanced_worktree_segment
     assert $state equals 0
-    assert "$output" same_as " | %F{red}rebase-m%f"
+    assert "$output" same_as "%F{242}𖠰%f | %F{red}rebase-m%f"
 
     functions -c _prompt_purity_enhanced_detect_repo_role_backup prompt_purity_enhanced_detect_repo_role
     unfunction _prompt_purity_enhanced_detect_repo_role_backup
@@ -123,7 +125,7 @@
 
     typeset -gA prompt_purity_enhanced_vcs_info
     typeset -g _purity_show_worktree_role=0
-    typeset -g _purity_repo_role="worktree"
+    typeset -g _purity_repo_role="bare"
     typeset -g _purity_worktree_name="feature-tree"
     typeset -g _purity_show_worktree_name=1
     prompt_purity_enhanced_vcs_info[action]="rebase-m"
@@ -152,7 +154,7 @@
 
     run prompt_purity_git_status
     assert $state equals 0
-    assert "$output" same_as " | ~2 %F{green}+1%f %F{red}-3%f"
+    assert "$output" same_as "~2 %F{green}+1%f %F{red}-3%f"
 
     cd "$old_pwd" || return 1
     mock_git_repo_cleanup "$repo"
@@ -171,7 +173,7 @@
 
     run prompt_purity_git_status
     assert $state equals 0
-    assert "$output" same_as " | *"
+    assert "$output" same_as "*"
 
     cd "$old_pwd" || return 1
     mock_git_repo_cleanup "$repo"
@@ -209,7 +211,7 @@
 
     run prompt_purity_git_status
     assert $state equals 0
-    assert "$output" same_as " | [~2 %F{green}+1%f %F{red}-3%f]"
+    assert "$output" same_as "[~2 %F{green}+1%f %F{red}-3%f]"
 
     cd "$old_pwd" || return 1
     mock_git_repo_cleanup "$repo"
@@ -228,7 +230,7 @@
 
     run prompt_purity_git_status
     assert $state equals 0
-    assert "$output" same_as " | ~2 %F{green}+1%f %F{red}-3%f %F{red}!1%f"
+    assert "$output" same_as "~2 %F{green}+1%f %F{red}-3%f %F{red}!1%f"
 
     cd "$old_pwd" || return 1
     mock_git_repo_cleanup "$repo"
@@ -247,7 +249,7 @@
 
     run prompt_purity_git_status
     assert $state equals 0
-    assert "$output" same_as " | [~2 %F{green}+1%f %F{red}-3%f %F{red}!1%f] (%F{green}+42%f,%F{red}-10%f)"
+    assert "$output" same_as "[~2 %F{green}+1%f %F{red}-3%f %F{red}!1%f] (%F{green}+42%f,%F{red}-10%f)"
 
     cd "$old_pwd" || return 1
     mock_git_repo_cleanup "$repo"
@@ -266,12 +268,12 @@
 
     run prompt_purity_git_status
     assert $state equals 0
-    assert "$output" same_as " | 2M %F{green}+1%f %F{red}-3%f"
+    assert "$output" same_as "2M %F{green}+1%f %F{red}-3%f"
 
     PURITY_GIT_SHOW_LINE_COUNTS=1
     run prompt_purity_git_status
     assert $state equals 0
-    assert "$output" same_as " | (%F{green}+42%f,%F{red}-10%f)"
+    assert "$output" same_as "(%F{green}+42%f,%F{red}-10%f)"
 
     cd "$old_pwd" || return 1
     mock_git_repo_cleanup "$repo"
@@ -280,10 +282,68 @@
 @test 'Prompt composition includes sync git render segments' {
     prompt_purity_enhanced_setup
 
-    assert "$PROMPT" contains "\\$(prompt_purity_enhanced_git_branch_sync)"
-    assert "$PROMPT" contains "\\$(prompt_purity_git_info)"
-    assert "$PROMPT" contains "\\$(prompt_purity_git_status)"
+    assert "$PROMPT" contains "\\$(prompt_purity_enhanced_optional_context)"
+    assert "$PROMPT" contains "\\$(prompt_purity_enhanced_optional_git)"
     assert "$PROMPT" contains "❯"
+}
+
+@test 'Git block joins branch worktree and status with separators' {
+    local old_pwd="$PWD"
+    local repo
+    repo=$(mock_git_repo_create)
+    cd "$repo" || return 1
+
+    functions -c prompt_purity_enhanced_detect_repo_role _prompt_purity_enhanced_detect_repo_role_backup
+    prompt_purity_enhanced_detect_repo_role() { : }
+
+    typeset -gA prompt_purity_enhanced_vcs_info
+    typeset -g _purity_show_worktree_role=1
+    typeset -g _purity_repo_role="worktree"
+    typeset -g _purity_worktree_name="feature-tree"
+    typeset -g _purity_show_worktree_name=1
+    typeset -g _purity_git_style="compact"
+    prompt_purity_enhanced_vcs_info[action]=""
+    prompt_purity_enhanced_vcs_info[status]="modified:3 added:1 deleted:2"
+
+    run prompt_purity_enhanced_git_block
+    assert $state equals 0
+    assert "$output" contains "%F{yellow}⎇ "
+    assert "$output" contains "%F{242}𖠰 feature-tree%f"
+    assert "$output" contains " | ~3 %F{green}+1%f %F{red}-2%f"
+
+    functions -c _prompt_purity_enhanced_detect_repo_role_backup prompt_purity_enhanced_detect_repo_role
+    unfunction _prompt_purity_enhanced_detect_repo_role_backup
+
+    cd "$old_pwd" || return 1
+    mock_git_repo_cleanup "$repo"
+}
+
+@test 'Git block omits leading separators when only status exists' {
+    local old_pwd="$PWD"
+    local repo
+    repo=$(mock_git_repo_create)
+    cd "$repo" || return 1
+
+    functions -c prompt_purity_enhanced_git_branch_sync _prompt_purity_enhanced_git_branch_sync_backup
+    prompt_purity_enhanced_git_branch_sync() { : }
+    functions -c prompt_purity_git_info _prompt_purity_git_info_backup
+    prompt_purity_git_info() { : }
+
+    typeset -gA prompt_purity_enhanced_vcs_info
+    typeset -g _purity_git_style="dirty"
+    prompt_purity_enhanced_vcs_info[status]="modified:1 added:0 deleted:0"
+
+    run prompt_purity_enhanced_git_block
+    assert $state equals 0
+    assert "$output" same_as "*"
+
+    functions -c _prompt_purity_enhanced_git_branch_sync_backup prompt_purity_enhanced_git_branch_sync
+    unfunction _prompt_purity_enhanced_git_branch_sync_backup
+    functions -c _prompt_purity_git_info_backup prompt_purity_git_info
+    unfunction _prompt_purity_git_info_backup
+
+    cd "$old_pwd" || return 1
+    mock_git_repo_cleanup "$repo"
 }
 
 @test 'Non-git directory render helpers return clean output and exit zero' {

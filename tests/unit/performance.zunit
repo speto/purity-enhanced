@@ -166,7 +166,7 @@
 
 @test 'Prompt rendering completes quickly' {
     local start_time=$EPOCHSECONDS
-    run prompt_purity_enhanced_render_preprompt
+    run prompt_purity_enhanced_render
     local end_time=$EPOCHSECONDS
     local duration=$((end_time - start_time))
     

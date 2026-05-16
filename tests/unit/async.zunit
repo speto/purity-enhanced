@@ -116,13 +116,33 @@
 @test 'Async callback handles context worker response' {
 	prompt_purity_enhanced_context_info=()
 
+	# Docker is async again (gated on Compose-file presence in async_docker_status)
+	# Languages remain sync (precmd). Async owns: docker, k8s, cloud, infra.
 	prompt_purity_enhanced_async_callback \
 		"prompt_purity_enhanced_async_context" \
 		0 \
-		$'docker:docker:running=2 stopped=1\nk8s:k8s:context=production' \
+		$'docker:docker:running=2 total=3\nk8s:k8s:context=production\ncloud:aws:dev-profile' \
 		"0.001"
 
-	assert "${prompt_purity_enhanced_context_info[docker]}" same_as "docker:running=2 stopped=1"
+	assert "${prompt_purity_enhanced_context_info[docker]}" same_as "docker:running=2 total=3"
+	assert "${prompt_purity_enhanced_context_info[k8s]}" same_as "k8s:context=production"
+	assert "${prompt_purity_enhanced_context_info[cloud]}" same_as "aws:dev-profile"
+}
+
+@test 'Async callback unsets docker context when worker omits it' {
+	# Simulate cd from a Compose dir to a non-Compose dir:
+	# previous prompt had docker context, current async worker returns nothing
+	# for docker (gated by _purity_has_compose), so callback must unset it.
+	prompt_purity_enhanced_context_info=()
+	prompt_purity_enhanced_context_info[docker]="docker:running=2 total=3"
+
+	prompt_purity_enhanced_async_callback \
+		"prompt_purity_enhanced_async_context" \
+		0 \
+		$'k8s:k8s:context=production' \
+		"0.001"
+
+	assert "${prompt_purity_enhanced_context_info[docker]}" same_as ""
 	assert "${prompt_purity_enhanced_context_info[k8s]}" same_as "k8s:context=production"
 }
 

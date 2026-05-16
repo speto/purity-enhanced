@@ -12,7 +12,7 @@ Purity Enhanced is a fork of the original [Purity](https://github.com/therealkla
 
 **Python Data Science Project:**
 ```
-~/ml-model (venv) 🐍 3.11 ⎇ feature/training | 2M +1 ❯
+~/ml-model (venv) 🐍 3.11 ⎇ feature/training ~2 +1 ❯
 ```
 Shows: virtual environment, Python 3.11, feature branch with 2 modified and 1 new file
 
@@ -30,7 +30,7 @@ Shows: AWS prod profile, Terraform staging workspace, Kubernetes production cont
 
 **Backend Development with Jobs:**
 ```
-~/api [✦2] 🐹 1.21 🐳1/1 ⎇ develop | 1M ❯
+~/api [✦2] 🐹 1.21 🐳1/1 ⎇ develop ~1 ❯
 ```
 Shows: 2 background jobs, Go 1.21, Docker running, develop branch with 1 modified file
 
@@ -56,16 +56,17 @@ Shows: 2 background jobs, Go 1.21, Docker running, develop branch with 1 modifie
 
 ### Git Status Indicators
 
-The theme displays git information with a clean, ccstatusline-inspired format:
+The theme displays git information with preset-aware git status styles:
 
 - `⎇ branch-name` - Current git branch
 - `𖠰 worktree-name` - Git worktree name (when applicable)
 - `rebase-i`, `merge`, etc. - Current git action in progress
 
-**File Count Display:**
-- `NM` - N modified files
-- `+N` Green - N added (untracked) files
-- `-N` Red - N deleted files
+**Status styles by preset:**
+- `minimal`: `*` when dirty
+- `balanced`: `~N +N -N` (compact)
+- `detailed`: `[~N +N -N]` (full)
+- `!N` Red - conflict indicator (balanced/detailed)
 
 **Optional Line Counts:**
 - `(+42,-10)` - Diff statistics showing added/deleted lines (when `PURITY_GIT_SHOW_LINE_COUNTS=1`)
@@ -180,6 +181,19 @@ zstyle ':prezto:module:prompt' theme 'purity_enhanced'
    ```
 
 ## Configuration
+
+### Presets
+
+#### `PURITY_PRESET`
+Selects the default prompt information density. Defaults to `balanced`.
+
+```sh
+PURITY_PRESET=minimal   # Branch + minimal git dirty marker
+PURITY_PRESET=balanced  # Compact git status + essential contexts
+PURITY_PRESET=detailed  # Full git status + all contexts
+```
+
+Existing `PURITY_SHOW_*` variables still act as explicit overrides on top of preset defaults.
 
 ### Performance Options
 

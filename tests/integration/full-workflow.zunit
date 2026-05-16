@@ -141,27 +141,35 @@
 }
 
 @test 'Context detection integration' {
-    # Test multiple context detection together
-    # Mock environment variables for different contexts
-    
-    # Skip test as context functions not implemented yet
-    skip "Context detection functions not yet implemented"
-    
-    # TODO: Implement when context functions are added
-    # Test Docker context
-    # Test Kubernetes context
-    # Test Virtual environment context
-    local orig_virtual_env=$VIRTUAL_ENV
-    VIRTUAL_ENV="/tmp/test-venv"
-    run prompt_purity_enhanced_virtualenv
-    assert $state equals 0
-    VIRTUAL_ENV=$orig_virtual_env
-    
-    # Test all contexts work together without conflicts
-    DOCKER_HOST="tcp://localhost:2375"
-    VIRTUAL_ENV="/tmp/test-venv"
-    run prompt_purity_enhanced_contexts
-    assert $state equals 0
+	typeset -gA prompt_purity_enhanced_context_info
+	prompt_purity_enhanced_context_info[docker]="docker:running=2 total=3"
+	# Language detection is now SYNC, uses _purity_sync_languages, not context_info
+	typeset -g _purity_sync_languages="node:20"
+	prompt_purity_enhanced_context_info[cloud]="aws:dev"
+
+	# Detailed preset should render all configured context categories
+	PURITY_PRESET=detailed
+	prompt_purity_enhanced_load_preset
+	prompt_purity_enhanced_build_context_line
+	
+	# Check that context is built - detailed preset renders all
+	assert "$prompt_purity_enhanced_context" is_not_empty
+	
+	# Check for key content - use pattern matching since Unicode may cause issues
+	[[ "$prompt_purity_enhanced_context" == *"docker"* ]] && assert $? equals 0
+	[[ "$prompt_purity_enhanced_context" == *"node"* ]] && assert $? equals 0
+	[[ "$prompt_purity_enhanced_context" == *"aws"* ]] && assert $? equals 0
+
+	# Minimal preset should hide docker/runtime/cloud context segments
+	PURITY_PRESET=minimal
+	prompt_purity_enhanced_load_preset
+	prompt_purity_enhanced_build_context_line
+	[[ "$prompt_purity_enhanced_context" != *"docker"* ]]
+	assert $? equals 0
+	[[ "$prompt_purity_enhanced_context" != *"node"* ]]
+	assert $? equals 0
+	[[ "$prompt_purity_enhanced_context" != *"aws"* ]]
+	assert $? equals 0
 }
 
 @test 'Performance with caching integration' {

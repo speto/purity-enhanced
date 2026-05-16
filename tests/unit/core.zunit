@@ -202,6 +202,243 @@
     # Verify preexec and precmd hooks are installed
 }
 
+@test 'Preset loader defaults to balanced profile' {
+    unset PURITY_PRESET
+
+    prompt_purity_enhanced_load_preset
+    local rc=$?
+    assert $rc equals 0
+    assert "$_purity_git_style" equals "compact"
+    assert "$_purity_show_docker" equals "1"
+    assert "$_purity_show_runtimes" equals "1"
+    assert "$_purity_show_cloud" equals "0"
+}
+
+@test 'Preset loader applies minimal profile flags' {
+    PURITY_PRESET=minimal
+
+    prompt_purity_enhanced_load_preset
+    local rc=$?
+    assert $rc equals 0
+    assert "$_purity_git_style" equals "dirty"
+    assert "$_purity_show_worktree_role" equals "0"
+    assert "$_purity_show_docker" equals "0"
+    assert "$_purity_show_runtimes" equals "0"
+    assert "$_purity_show_cloud" equals "0"
+}
+
+@test 'Detailed preset still allows explicit docker override' {
+    PURITY_PRESET=detailed
+    PURITY_SHOW_DOCKER=0
+    export PURITY_SUPPRESS_ASYNC_WARNING=1
+
+    prompt_purity_enhanced_load_preset
+    run prompt_purity_enhanced_async_docker_status
+    assert $state equals 0
+    assert "$output" is_empty
+
+    unset PURITY_SHOW_DOCKER
+}
+
+# =============================================================================
+# Compose-file Gate Tests (docker context only runs in Compose project dirs)
+# =============================================================================
+
+@test '_purity_has_compose returns false in directory without compose files' {
+	local tmpdir
+	tmpdir=$(mktemp -d)
+	local saved_pwd="$PWD"
+	cd "$tmpdir"
+
+	run _purity_has_compose
+	assert $state equals 1
+
+	cd "$saved_pwd"
+	rm -rf "$tmpdir"
+}
+
+@test '_purity_has_compose returns true when docker-compose.yml present' {
+	local tmpdir
+	tmpdir=$(mktemp -d)
+	touch "$tmpdir/docker-compose.yml"
+	local saved_pwd="$PWD"
+	cd "$tmpdir"
+
+	run _purity_has_compose
+	assert $state equals 0
+
+	cd "$saved_pwd"
+	rm -rf "$tmpdir"
+}
+
+@test '_purity_has_compose detects modern compose.yaml filename' {
+	local tmpdir
+	tmpdir=$(mktemp -d)
+	touch "$tmpdir/compose.yaml"
+	local saved_pwd="$PWD"
+	cd "$tmpdir"
+
+	run _purity_has_compose
+	assert $state equals 0
+
+	cd "$saved_pwd"
+	rm -rf "$tmpdir"
+}
+
+@test 'async_docker_status returns empty when no compose file in dir' {
+	# Label-based detection: docker ps queries containers by label; no containers
+	# will match the project label for a tmpdir, so output is empty.
+	# (compose-file gate was removed; detection is now purely label-based)
+	local tmpdir
+	tmpdir=$(mktemp -d)
+	local saved_pwd="$PWD"
+	cd "$tmpdir"
+	unset PURITY_SHOW_DOCKER
+	export PURITY_SUPPRESS_ASYNC_WARNING=1
+	prompt_purity_enhanced_load_preset
+	command -v docker &>/dev/null || skip "Docker not available in test environment"
+
+	run prompt_purity_enhanced_async_docker_status
+	assert $state equals 0
+	assert "$output" is_empty
+
+	cd "$saved_pwd"
+	rm -rf "$tmpdir"
+}
+
+# =============================================================================
+# Portable Timeout Tests (_purity_timeout fallback chain)
+# =============================================================================
+
+@test '_purity_timeout exists and runs commands that complete in time' {
+	run _purity_timeout 5 true
+	assert $state equals 0
+}
+
+@test '_purity_timeout returns non-zero when command exceeds limit' {
+	# Works on any tier: GNU timeout (124), gtimeout (124), or perl alarm (142).
+	# We don't assert specific exit code because tier varies by environment;
+	# we only assert the wrapper does NOT hang and returns non-zero.
+	run _purity_timeout 1 sleep 5
+	assert $state not_equal_to 0
+}
+
+@test '_purity_timeout preserves exit code from successful commands' {
+	run _purity_timeout 5 false
+	assert $state equals 1
+}
+
+@test '_purity_timeout captures stdout from wrapped command' {
+	run _purity_timeout 5 echo "hello world"
+	assert $state equals 0
+	assert "$output" same_as "hello world"
+}
+
+# =============================================================================
+# _purity_is_timeout_exit Helper Tests (DRY check for 124/142 codes)
+# =============================================================================
+
+@test '_purity_is_timeout_exit recognises GNU timeout exit code (124)' {
+	run _purity_is_timeout_exit 124
+	assert $state equals 0
+}
+
+@test '_purity_is_timeout_exit recognises perl alarm exit code (142)' {
+	# 142 = 128 + SIGALRM(14); perl `alarm` sets this on timeout via exec
+	run _purity_is_timeout_exit 142
+	assert $state equals 0
+}
+
+@test '_purity_is_timeout_exit rejects successful exit (0)' {
+	run _purity_is_timeout_exit 0
+	assert $state equals 1
+}
+
+@test '_purity_is_timeout_exit rejects generic failure exit (1)' {
+	# Important: must NOT treat regular command failures as timeouts,
+	# otherwise callers would incorrectly cache "timeout" state.
+	run _purity_is_timeout_exit 1
+	assert $state equals 1
+}
+
+# =============================================================================
+# _purity_has_compose: COMPOSE_FILE env var override
+# =============================================================================
+
+@test '_purity_has_compose honours COMPOSE_FILE env var' {
+	local tmpdir; tmpdir=$(mktemp -d)
+	local saved_pwd="$PWD"; cd "$tmpdir"
+	touch "$tmpdir/custom.yml"
+
+	COMPOSE_FILE="$tmpdir/custom.yml" run _purity_has_compose
+	assert $state equals 0
+
+	cd "$saved_pwd"; rm -rf "$tmpdir"
+}
+
+@test '_purity_has_compose detects .devcontainer/docker-compose.yml' {
+	# Devcontainers commonly nest compose files under .devcontainer/
+	local tmpdir; tmpdir=$(mktemp -d)
+	local saved_pwd="$PWD"; cd "$tmpdir"
+	mkdir -p .devcontainer && touch .devcontainer/docker-compose.yml
+
+	run _purity_has_compose
+	assert $state equals 0
+
+	cd "$saved_pwd"; rm -rf "$tmpdir"
+}
+
+
+# =============================================================================
+# Kubectl / GCloud / Azure directory gates
+# =============================================================================
+
+@test '_purity_has_kube_config returns true when KUBECONFIG env var set' {
+	KUBECONFIG=/some/path run _purity_has_kube_config
+	assert $state equals 0
+}
+
+@test '_purity_has_kube_config returns false when no kubeconfig anywhere' {
+	# Sandbox HOME so user's actual ~/.kube/config doesn't leak in.
+	local fake_home; fake_home=$(mktemp -d)
+	unset KUBECONFIG
+	HOME="$fake_home" run _purity_has_kube_config
+	assert $state equals 1
+	rm -rf "$fake_home"
+}
+
+@test '_purity_has_gcp_config returns true when GCLOUD_PROJECT env var set' {
+	GCLOUD_PROJECT=myproj run _purity_has_gcp_config
+	assert $state equals 0
+}
+
+@test '_purity_has_gcp_config returns true when CLOUDSDK_CORE_PROJECT set' {
+	CLOUDSDK_CORE_PROJECT=myproj run _purity_has_gcp_config
+	assert $state equals 0
+}
+
+@test '_purity_has_gcp_config returns false when no GCP context anywhere' {
+	local fake_home; fake_home=$(mktemp -d)
+	unset GCLOUD_PROJECT CLOUDSDK_CORE_PROJECT CLOUDSDK_CONFIG
+	HOME="$fake_home" run _purity_has_gcp_config
+	assert $state equals 1
+	rm -rf "$fake_home"
+}
+
+@test '_purity_has_azure_config returns true when AZURE_SUBSCRIPTION_ID set' {
+	AZURE_SUBSCRIPTION_ID=12345 run _purity_has_azure_config
+	assert $state equals 0
+}
+
+@test '_purity_has_azure_config returns false when no Azure context anywhere' {
+	local fake_home; fake_home=$(mktemp -d)
+	unset AZURE_SUBSCRIPTION_ID
+	HOME="$fake_home" run _purity_has_azure_config
+	assert $state equals 1
+	rm -rf "$fake_home"
+}
+
+
 @teardown {
     # Clean up mocks and state
     mock_async_cleanup

@@ -23,11 +23,15 @@ Purity Enhanced is a ZSH prompt theme that provides a minimal, fast, and informa
 ### Important Functions
 
 - `prompt_purity_enhanced_setup()` - Main initialization function that configures prompt variables and hooks
-- `prompt_purity_git_info()` - Displays git branch, worktree, and action status (ccstatusline-inspired format)
-- `prompt_purity_git_status()` - Shows file counts in ccstatusline format (NM modified, +N added, -N deleted)
+- `prompt_purity_enhanced_load_preset()` - Loads `PURITY_PRESET` defaults (`minimal`, `balanced`, `detailed`)
+- `prompt_purity_enhanced_detect_repo_role()` - Detects repo role (`none`, `main`, `worktree`, `bare`) and de-dup flags
+- `prompt_purity_enhanced_worktree_segment()` - Renders worktree/action segment with de-duplication rules
+- `prompt_purity_git_info()` - Displays worktree/action git context segment
+- `prompt_purity_git_status()` - Preset-aware git status rendering (`*`, `~N +N -N`, `[~N +N -N]`)
 - `prompt_purity_enhanced_git_branch_sync()` - Synchronous branch display for immediate prompt rendering
 - `prompt_purity_enhanced_chpwd()` - Directory change handler for cache invalidation
 - `prompt_purity_enhanced_async_tasks()` - Centralized async job queuing for non-blocking operations
+- `prompt_purity_enhanced_render()` - Single authoritative prompt render path (coalesced)
 - `prompt_purity_enhanced_cmd_exec_time()` - Tracks and displays command execution time
 
 *Note: `git_prompt_info()` and `git_prompt_status()` are provided as compatibility aliases when oh-my-zsh is not loaded.*
@@ -35,6 +39,7 @@ Purity Enhanced is a ZSH prompt theme that provides a minimal, fast, and informa
 ### Configuration Variables
 
 - `PURITY_CMD_MAX_EXEC_TIME` - Threshold for showing execution time (default: 5 seconds)
+- `PURITY_PRESET` - Prompt density preset (`minimal`, `balanced`, `detailed`; default: `balanced`)
 - `PURITY_GIT_SHOW_LINE_COUNTS` - Show line count statistics (+added,-deleted) in git status (default: 0)
 - `PURITY_WORKTREE_SHOW_BRANCH` - Show branch name in worktree display (default: 1)
 
@@ -66,10 +71,11 @@ The theme should work with multiple plugin managers. Test installation methods:
 When modifying git status display:
 - `⎇ branch` - Git branch (sync display)
 - `𖠰 worktree` - Git worktree name (when applicable)
-- `NM` - N modified files
-- `+N` Green - N added files
-- `-N` Red - N deleted files
-- `(+N,-N)` - Line counts (optional via PURITY_GIT_SHOW_LINE_COUNTS=1)
+- `*` - Dirty marker in `minimal`
+- `~N +N -N` - Compact status in `balanced`
+- `[~N +N -N]` - Full status in `detailed`
+- `!N` - Conflict indicator (balanced/detailed)
+- `(+N,-N)` - Line counts (optional in `detailed` via `PURITY_GIT_SHOW_LINE_COUNTS=1`)
 - `rebase-i`, `merge`, etc. - Current git action in progress
 
 ## Testing

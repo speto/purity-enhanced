@@ -47,11 +47,271 @@ prompt_purity_enhanced_perf_end() {
 	unset prompt_purity_perf_start
 }
 
+# ================================================================================================
+# SYNC LANGUAGE DETECTION (runs in precmd, not async — like p10k)
+# ================================================================================================
+
+# Cached version strings keyed by executable path — avoids re-running php --version every prompt
+typeset -gA _purity_version_cache
+
+# Get cached version or run command to detect it
+# Usage: _purity_cached_version <cmd> <args...>
+_purity_cached_version() {
+	local cmd="$1"; shift
+	local cmd_path
+	cmd_path=$(command -v "$cmd" 2>/dev/null) || return 1
+	local cache_key="${cmd_path}"
+
+	if [[ -n "${_purity_version_cache[$cache_key]}" ]]; then
+		echo "${_purity_version_cache[$cache_key]}"
+		return 0
+	fi
+
+	local version
+	version=$("$cmd" "$@" 2>/dev/null) || return 1
+	[[ -n "$version" ]] || return 1
+
+	_purity_version_cache[$cache_key]="$version"
+	echo "$version"
+}
+
+# Detect languages synchronously using upsearch + cached versions
+# Sets typeset -g _purity_sync_languages="node:18 php:8.5"
+prompt_purity_enhanced_sync_languages() {
+	[[ "${_purity_show_runtimes:-1}" == "0" ]] && { typeset -g _purity_sync_languages=""; return; }
+
+	local result=""
+
+	# Node.js
+	if [[ "${PURITY_SHOW_NODE:-1}" != "0" ]] && _purity_upsearch package.json .nvmrc .node-version; then
+		local v=""
+		if [[ -f .nvmrc ]]; then
+			v="$(cat .nvmrc 2>/dev/null | sed 's/^v//' | cut -d'.' -f1)"
+		elif [[ -f .node-version ]]; then
+			v="$(cat .node-version 2>/dev/null | sed 's/^v//' | cut -d'.' -f1)"
+		else
+			v=$(_purity_cached_version node --version | sed 's/^v//' | cut -d'.' -f1)
+		fi
+		[[ -n "$v" ]] && result+="node:${v} "
+	fi
+
+	# Ruby
+	if [[ "${PURITY_SHOW_RUBY:-1}" != "0" ]] && _purity_upsearch Gemfile .ruby-version; then
+		local v=""
+		if [[ -f .ruby-version ]]; then
+			v="$(cat .ruby-version 2>/dev/null | cut -d'.' -f1-2)"
+		else
+			v=$(_purity_cached_version ruby --version | awk '{print $2}' | cut -d'p' -f1 | cut -d'.' -f1-2)
+		fi
+		[[ -n "$v" ]] && result+="ruby:${v} "
+	fi
+
+	# Python
+	if [[ "${PURITY_SHOW_PYTHON_VERSION:-1}" != "0" ]] && _purity_upsearch pyproject.toml requirements.txt setup.py .python-version; then
+		local v=""
+		if [[ -f .python-version ]]; then
+			v="$(cat .python-version 2>/dev/null | cut -d'.' -f1-2)"
+		else
+			v=$(_purity_cached_version python --version | awk '{print $2}' | cut -d'.' -f1-2)
+		fi
+		[[ -n "$v" ]] && result+="python:${v} "
+	fi
+
+	# Go
+	if [[ "${PURITY_SHOW_GO:-1}" != "0" ]] && _purity_upsearch go.mod; then
+		local v=""
+		v="$(grep '^go ' go.mod 2>/dev/null | awk '{print $2}' | cut -d'.' -f1-2)"
+		[[ -z "$v" ]] && v=$(_purity_cached_version go version | awk '{print $3}' | sed 's/go//' | cut -d'.' -f1-2)
+		[[ -n "$v" ]] && result+="go:${v} "
+	fi
+
+	# Rust
+	if [[ "${PURITY_SHOW_RUST:-1}" != "0" ]] && _purity_upsearch Cargo.toml; then
+		local v=""
+		v=$(_purity_cached_version rustc --version | awk '{print $2}' | cut -d'.' -f1-2)
+		[[ -n "$v" ]] && result+="rust:${v} "
+	fi
+
+	# Java
+	if [[ "${PURITY_SHOW_JAVA:-1}" != "0" ]] && _purity_upsearch pom.xml build.gradle build.gradle.kts; then
+		local v=""
+		v=$(_purity_cached_version java -version 2>&1 | head -n1 | awk -F '"' '{print $2}' | cut -d'.' -f1)
+		[[ -n "$v" ]] && result+="java:${v} "
+	fi
+
+	# PHP
+	if [[ "${PURITY_SHOW_PHP:-1}" != "0" ]] && _purity_upsearch composer.json .php-version; then
+		local v=""
+		v=$(_purity_cached_version php --version | head -n1 | awk '{print $2}' | cut -d'-' -f1 | cut -d'.' -f1-2)
+		[[ -n "$v" ]] && result+="php:${v} "
+	fi
+
+	typeset -g _purity_sync_languages="${result% }"
+}
+
+
+# Walk up from $PWD checking each parent for marker files (Spaceship/p10k pattern)
+# Usage: _purity_upsearch file1 file2 ...
+# Returns 0 if any file found in $PWD or any parent up to git root (or filesystem root)
+_purity_upsearch() {
+	local dir="$PWD"
+	local root
+	root=$(command git rev-parse --show-toplevel 2>/dev/null) || root=""
+	while [[ -n "$dir" ]]; do
+		for f in "$@"; do
+			[[ -f "$dir/$f" ]] && return 0
+		done
+		# Stop at git root or filesystem root
+		[[ "$dir" == "$root" || "$dir" == "/" ]] && break
+		dir="${dir:h}"
+	done
+	return 1
+}
+
+# Detect whether the current working tree contains a Compose project file.
+# Walks up using _purity_upsearch (stops at git root or filesystem root).
+# Used to gate docker context detection so `docker ps` only runs in actual
+# Compose project directories (prevents `~`/random-dir overhead and shields
+# the prompt from a wedged docker daemon outside Compose work).
+#
+# Recognises:
+#   - Standard locations:  docker-compose.{yml,yaml}, compose.{yml,yaml},
+#                          plus *.override.* variants
+#   - Devcontainer pattern: .devcontainer/docker-compose.yml
+#   - Explicit override:    $COMPOSE_FILE env var (Docker Compose's own override)
+#
+_purity_has_compose() {
+
+	# Docker Compose's own override mechanism — if user set this, trust it
+	[[ -n "${COMPOSE_FILE:-}" ]] && return 0
+
+	# Devcontainer pattern (relative to git root or any parent)
+	local dir="$PWD"
+	local root
+	root=$(command git rev-parse --show-toplevel 2>/dev/null) || root=""
+	while [[ -n "$dir" ]]; do
+		[[ -f "$dir/.devcontainer/docker-compose.yml" ]] && return 0
+		[[ -f "$dir/.devcontainer/docker-compose.yaml" ]] && return 0
+		[[ "$dir" == "$root" || "$dir" == "/" ]] && break
+		dir="${dir:h}"
+	done
+
+	# Standard compose file discovery
+	_purity_upsearch docker-compose.yml docker-compose.yaml \
+	                  compose.yml compose.yaml \
+	                  docker-compose.override.yml docker-compose.override.yaml \
+	                  compose.override.yml compose.override.yaml
+}
+
+
+
+# Detect whether the user has a Kubernetes configuration that warrants
+# probing kubectl. Used to gate the k8s context segment so `kubectl config
+# current-context` (which can hang on external auth plugins) only runs
+# when there's a plausible reason to. Local config reads are usually fast,
+# but kubeconfig with `exec` auth providers can stall.
+_purity_has_kube_config() {
+	[[ -n "${KUBECONFIG:-}" ]] && return 0
+	[[ -f "$HOME/.kube/config" ]] && return 0
+	return 1
+}
+
+# Detect whether the user has a Google Cloud SDK configuration.
+# Gates `gcloud config get-value project` to directories/sessions where GCP
+# is actually configured. Honours $CLOUDSDK_CORE_PROJECT/$GCLOUD_PROJECT
+# fast-path (the cloud-info function already reads those before shelling out).
+_purity_has_gcp_config() {
+	[[ -n "${CLOUDSDK_CORE_PROJECT:-}" ]] && return 0
+	[[ -n "${GCLOUD_PROJECT:-}" ]] && return 0
+	[[ -d "$HOME/.config/gcloud" ]] && return 0
+	[[ -d "${CLOUDSDK_CONFIG:-}" ]] && return 0
+	return 1
+}
+
+# Detect whether the user has an Azure CLI configuration.
+# Gates `az account show` which is the slowest of the three (can refresh
+# token → round-trip to Azure). Honours $AZURE_SUBSCRIPTION_ID fast-path
+# (caller already reads it for the display value).
+_purity_has_azure_config() {
+	[[ -n "${AZURE_SUBSCRIPTION_ID:-}" ]] && return 0
+	[[ -d "$HOME/.azure" ]] && return 0
+	return 1
+}
+
+# Portable timeout wrapper.
+# Usage: _purity_timeout <seconds> <command> [args...]
+#
+# Tier 1: GNU `timeout`           (Linux default — most distros ship coreutils)
+# Tier 2: `gtimeout`               (macOS via `brew install coreutils`)
+# Tier 3: `perl -e 'alarm ...'`    (perl ships with macOS at /usr/bin/perl;
+#                                   POSIX SIGALRM via exec replaces process —
+#                                   output/exit codes flow naturally)
+# Tier 4: run direct               (last-resort graceful degradation)
+#
+# Exit codes: GNU timeout uses 124 on timeout; perl/alarm uses 142 (128+SIGALRM).
+# Callers checking specific timeout exit codes must accept BOTH 124 and 142.
+_purity_timeout() {
+	local secs=$1; shift
+	if command -v timeout &>/dev/null; then
+		timeout "$secs" "$@"
+	elif command -v gtimeout &>/dev/null; then
+		gtimeout "$secs" "$@"
+	elif command -v perl &>/dev/null; then
+		perl -e 'alarm shift; exec @ARGV' "$secs" "$@"
+	else
+		# No timeout mechanism available — run direct.
+		# This is genuinely unsafe if the command hangs, but only reachable on
+		# truly stripped systems (no coreutils, no perl). Callers in sync paths
+		# (e.g. precmd) should additionally gate by presence checks to minimize
+		# the chance of ever invoking a hang-prone command here.
+		"$@"
+	fi
+}
+
+# Detect whether an exit code indicates a timeout from _purity_timeout.
+# Accepts both 124 (GNU timeout(1)) and 142 (perl alarm via SIGALRM=14).
+# Use this in callers that need to distinguish "timeout" from "command
+# failed for other reasons" so they can cache the timeout state.
+_purity_is_timeout_exit() {
+	[[ "$1" == "124" || "$1" == "142" ]]
+}
+
 # Cache debug logging
 prompt_purity_enhanced_cache_debug() {
 	[[ "${PURITY_DEBUG_CACHE:-0}" == "0" ]] && return
 	local message="$1"
 	echo "[CACHE] $message" >&2
+}
+
+# Conditionally prefix a space to non-empty content (for PROMPT composition)
+prompt_purity_enhanced_prefix_space() {
+	[[ -n "$1" ]] && print -r -- " $1"
+}
+
+# Git block compositor — joins git subsegments with proper separators
+prompt_purity_enhanced_git_block() {
+	local branch worktree git_status out=""
+	branch="$(prompt_purity_enhanced_git_branch_sync)"
+	worktree="$(prompt_purity_git_info)"
+	git_status="$(prompt_purity_git_status)"
+
+	[[ -n "$branch" ]] && out+="$branch"
+	[[ -n "$worktree" ]] && out+="${out:+ }$worktree"
+	[[ -n "$git_status" ]] && {
+		[[ -n "$out" ]] && out+=" | $git_status" || out+="$git_status"
+	}
+
+	print -r -- "$out"
+}
+
+# Wrapper for PROMPT substitution — prefixes space to context if non-empty
+prompt_purity_enhanced_optional_context() {
+	prompt_purity_enhanced_prefix_space "${prompt_purity_enhanced_context}"
+}
+
+# Wrapper for PROMPT substitution — prefixes space to git block if non-empty
+prompt_purity_enhanced_optional_git() {
+	prompt_purity_enhanced_prefix_space "$(prompt_purity_enhanced_git_block)"
 }
 
 # ================================================================================================
@@ -69,7 +329,26 @@ typeset -g _purity_show_runtimes=1
 typeset -g _purity_show_cloud=1
 
 # Context display options (set to 0 to disable)
-# These override preset defaults when explicitly set
+# These override preset defaults when explicitly set.
+# Snapshot which vars the USER explicitly set BEFORE :=1 defaults fill them in.
+# We use a separate flag array so the override block can distinguish
+# "user set this" from "code defaulted this".
+typeset -gA _purity_user_set_show
+[[ -v PURITY_SHOW_DOCKER         ]] && _purity_user_set_show[docker]=1
+[[ -v PURITY_SHOW_KUBERNETES     ]] && _purity_user_set_show[kubernetes]=1
+[[ -v PURITY_SHOW_AWS            ]] && _purity_user_set_show[aws]=1
+[[ -v PURITY_SHOW_GCP            ]] && _purity_user_set_show[gcp]=1
+[[ -v PURITY_SHOW_AZURE          ]] && _purity_user_set_show[azure]=1
+[[ -v PURITY_SHOW_TERRAFORM      ]] && _purity_user_set_show[terraform]=1
+[[ -v PURITY_SHOW_PULUMI         ]] && _purity_user_set_show[pulumi]=1
+[[ -v PURITY_SHOW_NODE           ]] && _purity_user_set_show[node]=1
+[[ -v PURITY_SHOW_RUBY           ]] && _purity_user_set_show[ruby]=1
+[[ -v PURITY_SHOW_PYTHON         ]] && _purity_user_set_show[python]=1
+[[ -v PURITY_SHOW_PYTHON_VERSION ]] && _purity_user_set_show[python_version]=1
+[[ -v PURITY_SHOW_GO             ]] && _purity_user_set_show[go]=1
+[[ -v PURITY_SHOW_RUST           ]] && _purity_user_set_show[rust]=1
+[[ -v PURITY_SHOW_JAVA           ]] && _purity_user_set_show[java]=1
+[[ -v PURITY_SHOW_PHP            ]] && _purity_user_set_show[php]=1
 : ${PURITY_SHOW_DOCKER:=1}
 : ${PURITY_SHOW_KUBERNETES:=1}
 : ${PURITY_SHOW_AWS:=1}
@@ -627,8 +906,17 @@ prompt_purity_enhanced_async_init() {
 
 # Async git worker
 prompt_purity_enhanced_async_git() {
+	# Sync to caller's PWD (passed as $1 by async_tasks, or fallback to current)
+	[[ -n "${1:-}" ]] && builtin cd -q "$1" 2>/dev/null
+
 	# Check if we're in a git repository
 	command git rev-parse --is-inside-work-tree &>/dev/null || return 0
+
+	# Tag output with PWD and git toplevel so callback can reject stale results
+	print -r -- "pwd:$PWD"
+	local git_toplevel
+	git_toplevel=$(command git rev-parse --show-toplevel 2>/dev/null)
+	print -r -- "top:${git_toplevel}"
 
 	prompt_purity_enhanced_detect_repo_role
 
@@ -736,21 +1024,19 @@ prompt_purity_enhanced_detect_repo_role() {
 	typeset -g _purity_branch_name=""
 	typeset -g _purity_show_worktree_name=0
 
-	# Check if we're in a git repository
-	if ! command git rev-parse --is-inside-work-tree &>/dev/null; then
-		return 0
-	fi
-
-	# Get git directory
+	# Get git directory first (works for both bare and non-bare repos)
 	local git_dir
 	git_dir=$(command git rev-parse --git-dir 2>/dev/null) || return 0
 
-	# Detect repository role
-	# 1. Check if bare repository
+	# 1. Check if bare repository FIRST — bare repos fail --is-inside-work-tree
 	if [[ "$(command git rev-parse --is-bare-repository 2>/dev/null)" == "true" ]]; then
 		_purity_repo_role="bare"
-		# Get branch name for bare repo
 		_purity_branch_name=$(command git symbolic-ref --short HEAD 2>/dev/null || command git rev-parse --short HEAD 2>/dev/null)
+		return 0
+	fi
+
+	# Non-bare: require work-tree
+	if ! command git rev-parse --is-inside-work-tree &>/dev/null; then
 		return 0
 	fi
 
@@ -762,12 +1048,14 @@ prompt_purity_enhanced_detect_repo_role() {
 		# Get branch name
 		_purity_branch_name=$(command git symbolic-ref --short HEAD 2>/dev/null || command git rev-parse --short HEAD 2>/dev/null)
 		
-		# De-duplication logic
-		local cwd_basename="${PWD##*/}"
+		# De-duplication logic — compare against worktree root, not current subdir
+		local worktree_root
+		worktree_root=$(command git rev-parse --show-toplevel 2>/dev/null)
+		local worktree_root_basename="${worktree_root##*/}"
 		local branch_leaf="${_purity_branch_name##*/}"
 		
-		# Rule 1: If cwd_basename equals worktree_name, don't show worktree name
-		if [[ "$cwd_basename" == "$_purity_worktree_name" ]]; then
+		# Rule 1: If worktree root basename equals worktree_name, don't show worktree name
+		if [[ "$worktree_root_basename" == "$_purity_worktree_name" ]]; then
 			_purity_show_worktree_name=0
 			return 0
 		fi
@@ -805,21 +1093,25 @@ prompt_purity_enhanced_detect_repo_role() {
 
 # Unified async context worker
 prompt_purity_enhanced_async_context() {
+	# Sync to caller's PWD (passed as $1 by async_tasks, or fallback to current)
+	[[ -n "${1:-}" ]] && builtin cd -q "$1" 2>/dev/null
+
 	local output=()
 	local context_output=""
 	local cache_key=""
 
-	if (( ${PURITY_ASYNC_DOCKER:-1} )); then
-		if prompt_purity_enhanced_should_invalidate_cache "docker"; then
-			cache_key="$(prompt_purity_enhanced_generate_cache_key "docker")"
-			prompt_purity_enhanced_cache_invalidate "$cache_key"
-			prompt_purity_enhanced_cache_invalidate "docker"
-		fi
+	# Tag output with PWD so callback can reject stale results
+	output+=("pwd:$PWD")
+
+	# Docker context (async) — gated inside async_docker_status by Compose presence.
+	# No cache-invalidation needed: async_docker_status is now no-cache (runtime
+	# state is always re-probed; see RUNTIME STATE note in that function).
+	if [[ "${_purity_show_docker:-1}" == "1" ]] && (( ${PURITY_ASYNC_DOCKER:-1} )); then
 		context_output=$(prompt_purity_enhanced_async_docker_status)
 		[[ -n "$context_output" ]] && output+=("docker:$context_output")
 	fi
 
-	if (( ${PURITY_ASYNC_K8S:-1} )); then
+	if [[ "${_purity_show_cloud:-1}" == "1" ]] && (( ${PURITY_ASYNC_K8S:-1} )); then
 		if prompt_purity_enhanced_should_invalidate_cache "k8s"; then
 			cache_key="$(prompt_purity_enhanced_generate_cache_key "k8s")"
 			prompt_purity_enhanced_cache_invalidate "$cache_key"
@@ -829,17 +1121,10 @@ prompt_purity_enhanced_async_context() {
 		[[ -n "$context_output" ]] && output+=("k8s:$context_output")
 	fi
 
-	if (( ${PURITY_ASYNC_LANGUAGES:-1} )); then
-		if prompt_purity_enhanced_should_invalidate_cache "languages"; then
-			cache_key="$(prompt_purity_enhanced_generate_cache_key "languages")"
-			prompt_purity_enhanced_cache_invalidate "$cache_key"
-			prompt_purity_enhanced_cache_invalidate "languages"
-		fi
-		context_output=$(prompt_purity_enhanced_async_language_versions)
-		[[ -n "$context_output" ]] && output+=("languages:$context_output")
-	fi
+	# NOTE: Language detection is now SYNC (runs in precmd via prompt_purity_enhanced_sync_languages)
+	# This eliminates the one-prompt delay for language indicators after cd.
 
-	if (( ${PURITY_ASYNC_CLOUD:-1} )); then
+	if [[ "${_purity_show_cloud:-1}" == "1" ]] && (( ${PURITY_ASYNC_CLOUD:-1} )); then
 		if prompt_purity_enhanced_should_invalidate_cache "cloud"; then
 			cache_key="$(prompt_purity_enhanced_generate_cache_key "cloud")"
 			prompt_purity_enhanced_cache_invalidate "$cache_key"
@@ -849,7 +1134,7 @@ prompt_purity_enhanced_async_context() {
 		[[ -n "$context_output" ]] && output+=("cloud:$context_output")
 	fi
 
-	if (( ${PURITY_ASYNC_INFRA:-1} )); then
+	if [[ "${_purity_show_cloud:-1}" == "1" ]] && (( ${PURITY_ASYNC_INFRA:-1} )); then
 		if prompt_purity_enhanced_should_invalidate_cache "infra"; then
 			cache_key="$(prompt_purity_enhanced_generate_cache_key "infra")"
 			prompt_purity_enhanced_cache_invalidate "$cache_key"
@@ -868,82 +1153,107 @@ prompt_purity_enhanced_async_context() {
 # ================================================================================================
 
 # Async Docker operations - Enhanced with smart caching
+prompt_purity_enhanced_docker_sanitize_project_name() {
+	local project_name="${1:-}"
+	project_name="${(L)project_name}"
+	project_name="${project_name//./}"
+	echo "$project_name"
+}
+
+prompt_purity_enhanced_docker_project_candidates() {
+	local current_dir="$PWD"
+	local dir_name sanitized_name
+	local -A seen_names
+
+	while true; do
+		dir_name="${current_dir:t}"
+		if [[ -n "$dir_name" ]] && [[ -z ${seen_names[$dir_name]} ]]; then
+			seen_names[$dir_name]=1
+			print -r -- "$dir_name"
+		fi
+
+		sanitized_name="$(prompt_purity_enhanced_docker_sanitize_project_name "$dir_name")"
+		if [[ -n "$sanitized_name" ]] && [[ -z ${seen_names[$sanitized_name]} ]]; then
+			seen_names[$sanitized_name]=1
+			print -r -- "$sanitized_name"
+		fi
+
+		[[ "$current_dir" == "/" ]] && break
+		current_dir="${current_dir:h}"
+	done
+}
+
+prompt_purity_enhanced_docker_match_project_label() {
+	local all_labels_output="$1"
+	local candidate label
+	local -a candidates labels
+	local -A available_labels
+
+	labels=("${(@f)all_labels_output}")
+	for label in "${labels[@]}"; do
+		[[ -n "$label" ]] && available_labels[$label]=1
+	done
+
+	candidates=("${(@f)$(prompt_purity_enhanced_docker_project_candidates)}")
+	for candidate in "${candidates[@]}"; do
+		if [[ -n ${available_labels[$candidate]} ]]; then
+			print -r -- "$candidate"
+			return 0
+		fi
+	done
+
+	return 1
+}
+
 prompt_purity_enhanced_async_docker_status() {
 	# Check if Docker is available and enabled
+	[[ "${_purity_show_docker:-1}" == "0" ]] && return
 	[[ "${PURITY_SHOW_DOCKER:-1}" == "0" ]] && return
 	command -v docker &>/dev/null || return
+
+	# Label-based detection: probe docker for matching compose project labels.
+	# No compose-file-in-cwd requirement — labels identify the project regardless of cwd.
+
+	# RUNTIME STATE — NO CACHE.
+	#
+	# Container counts are runtime state (containers start/stop without
+	# modifying any file we could mtime-watch). Caching this produces stale
+	# numbers after `docker compose stop` until TTL expiry.
+	#
+	# Research-backed (2026-05 librarian investigation of Spaceship-prompt,
+	# lazydocker, k9s): the dominant pattern for runtime-state segments is
+	# "no cache, always re-probe". Spaceship's docker_compose section does
+	# exactly this; lazydocker polls at 1Hz; k9s defaults to 2s refresh.
+	#
+	# Cost is acceptable here because:
+	#   1. We're in the async worker (does not block prompt rendering)
+	#   2. The compose-file gate above ensures we only run in Compose dirs
+	#   3. _purity_timeout 3 bounds worst case if daemon is unresponsive
+	#   4. `docker ps` against a healthy local daemon is 10-50ms
 	
-	# Check for docker-compose files in current directory
-	local compose_files=("docker-compose.yml" "docker-compose.yaml" "compose.yml" "compose.yaml")
-	local has_compose=0
-	for file in $compose_files; do
-		[[ -f "$file" ]] && { has_compose=1; break; }
-	done
-	[[ $has_compose == 0 ]] && return
-	
-	# Generate smart cache key for this directory
-	local cache_key="$(prompt_purity_enhanced_generate_cache_key "docker")"
-	
-	# Check cache first with fast return
-	local cached_result
-	if cached_result="$(prompt_purity_enhanced_cache_get "$cache_key" "${PURITY_CACHE_TTL_MEDIUM}" 2>/dev/null)" && [[ -n "$cached_result" ]]; then
-		echo "$cached_result"
-		return
-	fi
-	
-	# Try legacy cache for backwards compatibility
-	if cached_result="$(prompt_purity_enhanced_cache_get "docker" "${PURITY_CACHE_TTL_MEDIUM}" 2>/dev/null)" && [[ -n "$cached_result" ]]; then
-		echo "$cached_result"
-		# Migrate to new cache key
-		prompt_purity_enhanced_cache_set "$cache_key" "$cached_result"
-		return
-	fi
-	
-	# Expensive Docker operations with shorter timeouts for better responsiveness
-	local running_count=0 total_count=0
-	
-	# Method 1: Use docker compose ps if available (newer Docker Compose)
-	if command -v docker &>/dev/null && timeout 3 docker compose version &>/dev/null; then
-		local compose_output
-		compose_output=$(timeout 3 docker compose ps --all --format json 2>/dev/null)
-		if [[ -n "$compose_output" ]]; then
-			running_count=$(echo "$compose_output" | grep -c '"State":"running"' 2>/dev/null || echo 0)
-			total_count=$(echo "$compose_output" | grep -c '"Name":' 2>/dev/null || echo 0)
-		fi
-	fi
-	
-	# Method 2: Fallback to label-based detection (most reliable)
-	if [[ $total_count -eq 0 ]]; then
-		# Docker Compose sanitizes project names: strips dots, special chars, lowercases
-		# Use com.docker.compose.project label for reliable matching
-		local compose_project="${PWD##*/}"
-		# Sanitize the same way Docker does: lowercase, remove non-alphanumeric except dash
-		compose_project="${(L)compose_project//[^a-zA-Z0-9-]/}"
-		
-		running_count=$(timeout 3 docker ps -q --filter "label=com.docker.compose.project=${compose_project}" 2>/dev/null | wc -l | tr -d ' ') || running_count=0
-		total_count=$(timeout 3 docker ps -aq --filter "label=com.docker.compose.project=${compose_project}" 2>/dev/null | wc -l | tr -d ' ') || total_count=0
+	local running_labels_output all_labels_output project_label
+	running_labels_output=$(_purity_timeout 3 docker ps --format '{{.Label "com.docker.compose.project"}}' 2>/dev/null) || running_labels_output=""
+	all_labels_output=$(_purity_timeout 3 docker ps -a --format '{{.Label "com.docker.compose.project"}}' 2>/dev/null) || all_labels_output=""
+	project_label="$(prompt_purity_enhanced_docker_match_project_label "$all_labels_output")" || project_label=""
+
+	local running_count=0 total_count=0 label
+	if [[ -n "$project_label" ]]; then
+		for label in ${(f)running_labels_output}; do
+			[[ "$label" == "$project_label" ]] && (( running_count++ ))
+		done
+
+		for label in ${(f)all_labels_output}; do
+			[[ "$label" == "$project_label" ]] && (( total_count++ ))
+		done
 	fi
 	
 	# Format result
 	local result=""
 	if [[ "${total_count:-0}" -gt 0 ]]; then
-		local stopped_count=$((total_count - running_count))
-		if [[ $stopped_count -gt 0 ]]; then
-			result="docker:running=${running_count} stopped=${stopped_count}"
-		else
-			result="docker:running=${running_count}"
-		fi
+		result="docker:running=${running_count} total=${total_count}"
 	fi
 	
-	# Cache result using both smart key and legacy key
-	if [[ -n "$result" ]]; then
-		prompt_purity_enhanced_cache_set "$cache_key" "$result"
-		prompt_purity_enhanced_cache_set "docker" "$result"  # Legacy compatibility
-	else
-		# Cache negative results to avoid repeated expensive calls
-		prompt_purity_enhanced_cache_set "$cache_key" "docker:none"
-		prompt_purity_enhanced_cache_set "docker" "docker:none"
-	fi
+	# Intentionally NOT caching the result — see RUNTIME STATE note above.
 	
 	echo "$result"
 }
@@ -951,8 +1261,14 @@ prompt_purity_enhanced_async_docker_status() {
 # Async Kubernetes operations - Enhanced with smart caching and timeout handling
 prompt_purity_enhanced_async_k8s_context() {
 	# Check if Kubernetes is enabled and kubectl is available
+	[[ "${_purity_show_cloud:-1}" == "0" ]] && return
 	[[ "${PURITY_SHOW_KUBERNETES:-1}" == "0" ]] && return
 	command -v kubectl &>/dev/null || return
+
+	# Gate: skip when no kubeconfig is configured (avoids running kubectl in
+	# every directory just because the binary is installed; kubeconfig with
+	# `exec` auth providers can stall on token refresh).
+	_purity_has_kube_config || return
 	
 	# Generate smart cache key including kubeconfig context
 	local cache_key="$(prompt_purity_enhanced_generate_cache_key "k8s")"
@@ -964,20 +1280,14 @@ prompt_purity_enhanced_async_k8s_context() {
 		return
 	fi
 	
-	# Try legacy cache for backwards compatibility
-	if cached_result="$(prompt_purity_enhanced_cache_get "k8s" "${PURITY_CACHE_TTL_MEDIUM}" 2>/dev/null)" && [[ -n "$cached_result" ]]; then
-		echo "$cached_result"
-		# Migrate to new cache key
-		prompt_purity_enhanced_cache_set "$cache_key" "$cached_result"
-		return
-	fi
-	
 	# Get current context with aggressive timeout to prevent hanging
 	local kube_context
-	kube_context=$(timeout 3 kubectl config current-context 2>/dev/null)
+	kube_context=$(_purity_timeout 3 kubectl config current-context 2>/dev/null)
 	
 	# Handle timeout/error cases gracefully
-	if [[ $? -eq 124 ]]; then
+	# Exit codes: 124 from GNU timeout(1), 142 from perl alarm (SIGALRM=14, 128+14)
+	local kube_exit=$?
+	if _purity_is_timeout_exit "$kube_exit"; then
 		# Timeout occurred - cache the timeout state to avoid repeated attempts
 		prompt_purity_enhanced_cache_set "$cache_key" "k8s:timeout"
 		prompt_purity_enhanced_cache_set "k8s" "k8s:timeout"
@@ -997,7 +1307,7 @@ prompt_purity_enhanced_async_k8s_context() {
 	
 	# Cache result using both smart key and legacy key
 	prompt_purity_enhanced_cache_set "$cache_key" "$result"
-	prompt_purity_enhanced_cache_set "k8s" "$result"  # Legacy compatibility
+	
 	
 	[[ "$result" != "k8s:none" && "$result" != "k8s:timeout" ]] && echo "$result"
 }
@@ -1005,6 +1315,8 @@ prompt_purity_enhanced_async_k8s_context() {
 # Async language version detection - Enhanced with file-based caching and parallel checks
 prompt_purity_enhanced_async_language_versions() {
 	local result=""
+
+	[[ "${_purity_show_runtimes:-1}" == "0" ]] && return
 	
 	# Generate smart cache key per project directory
 	local cache_key="$(prompt_purity_enhanced_generate_cache_key "languages")"
@@ -1016,17 +1328,9 @@ prompt_purity_enhanced_async_language_versions() {
 		return
 	fi
 	
-	# Try legacy cache for backwards compatibility
-	if cached_result="$(prompt_purity_enhanced_cache_get "languages" "${PURITY_CACHE_TTL_FAST}" 2>/dev/null)" && [[ -n "$cached_result" ]]; then
-		echo "$cached_result"
-		# Migrate to new cache key
-		prompt_purity_enhanced_cache_set "$cache_key" "$cached_result"
-		return
-	fi
-	
 	# Check for version files first (fast) before calling commands (slow)
 	# Node.js version - check .nvmrc or .node-version first
-	if [[ "${PURITY_SHOW_NODE:-1}" != "0" ]] && ([[ -f package.json ]] || [[ -f .nvmrc ]] || [[ -f .node-version ]]) && command -v node &>/dev/null; then
+	if [[ "${PURITY_SHOW_NODE:-1}" != "0" ]] && _purity_upsearch package.json .nvmrc .node-version && command -v node &>/dev/null; then
 		local node_version
 		# Try version files first (much faster)
 		if [[ -f .nvmrc ]]; then
@@ -1035,70 +1339,70 @@ prompt_purity_enhanced_async_language_versions() {
 			node_version="$(cat .node-version 2>/dev/null | sed 's/^v//' | cut -d'.' -f1)"
 		else
 			# Fallback to node command with shorter timeout
-			node_version=$(timeout 2 node --version 2>/dev/null | sed 's/^v//' | cut -d'.' -f1)
+			node_version=$(_purity_timeout 2 node --version 2>/dev/null | sed 's/^v//' | cut -d'.' -f1)
 		fi
 		[[ -n "$node_version" ]] && result+="node:${node_version} "
 	fi
 	
 	# Ruby version - check .ruby-version first
-	if [[ "${PURITY_SHOW_RUBY:-1}" != "0" ]] && ([[ -f Gemfile ]] || [[ -f .ruby-version ]]) && command -v ruby &>/dev/null; then
+	if [[ "${PURITY_SHOW_RUBY:-1}" != "0" ]] && _purity_upsearch Gemfile .ruby-version && command -v ruby &>/dev/null; then
 		local ruby_version
 		if [[ -f .ruby-version ]]; then
 			ruby_version="$(cat .ruby-version 2>/dev/null | cut -d'.' -f1-2)"
 		else
-			ruby_version=$(timeout 2 ruby --version 2>/dev/null | awk '{print $2}' | cut -d'p' -f1 | cut -d'.' -f1-2)
+			ruby_version=$(_purity_timeout 2 ruby --version 2>/dev/null | awk '{print $2}' | cut -d'p' -f1 | cut -d'.' -f1-2)
 		fi
 		[[ -n "$ruby_version" ]] && result+="ruby:${ruby_version} "
 	fi
 	
 	# Python version - check .python-version first
-	if [[ "${PURITY_SHOW_PYTHON_VERSION:-1}" != "0" ]] && ([[ -f pyproject.toml ]] || [[ -f requirements.txt ]] || [[ -f setup.py ]] || [[ -f .python-version ]]) && command -v python &>/dev/null; then
+	if [[ "${PURITY_SHOW_PYTHON_VERSION:-1}" != "0" ]] && _purity_upsearch pyproject.toml requirements.txt setup.py .python-version && command -v python &>/dev/null; then
 		local python_version
 		if [[ -f .python-version ]]; then
 			python_version="$(cat .python-version 2>/dev/null | cut -d'.' -f1-2)"
 		else
-			python_version=$(timeout 2 python --version 2>/dev/null | awk '{print $2}' | cut -d'.' -f1-2)
+			python_version=$(_purity_timeout 2 python --version 2>/dev/null | awk '{print $2}' | cut -d'.' -f1-2)
 		fi
 		[[ -n "$python_version" ]] && result+="python:${python_version} "
 	fi
 	
 	# Go version - check go.mod for version hint first
-	if [[ "${PURITY_SHOW_GO:-1}" != "0" ]] && [[ -f go.mod ]] && command -v go &>/dev/null; then
+	if [[ "${PURITY_SHOW_GO:-1}" != "0" ]] && _purity_upsearch go.mod && command -v go &>/dev/null; then
 		local go_version
 		# Try to extract go version from go.mod first
 		local mod_version="$(grep '^go ' go.mod 2>/dev/null | awk '{print $2}' | cut -d'.' -f1-2)"
 		if [[ -n "$mod_version" ]]; then
 			go_version="$mod_version"
 		else
-			go_version=$(timeout 2 go version 2>/dev/null | awk '{print $3}' | sed 's/go//' | cut -d'.' -f1-2)
+			go_version=$(_purity_timeout 2 go version 2>/dev/null | awk '{print $3}' | sed 's/go//' | cut -d'.' -f1-2)
 		fi
 		[[ -n "$go_version" ]] && result+="go:${go_version} "
 	fi
 	
 	# Rust version - check rust-toolchain first
-	if [[ "${PURITY_SHOW_RUST:-1}" != "0" ]] && [[ -f Cargo.toml ]] && command -v rustc &>/dev/null; then
+	if [[ "${PURITY_SHOW_RUST:-1}" != "0" ]] && _purity_upsearch Cargo.toml && command -v rustc &>/dev/null; then
 		local rust_version
 		if [[ -f rust-toolchain ]] || [[ -f rust-toolchain.toml ]]; then
 			# Extract version from toolchain file
 			rust_version="$(grep -E '^[0-9]|channel.*[0-9]' rust-toolchain rust-toolchain.toml 2>/dev/null | head -n1 | grep -o '[0-9][0-9.]*' | cut -d'.' -f1-2)"
 		fi
 		if [[ -z "$rust_version" ]]; then
-			rust_version=$(timeout 2 rustc --version 2>/dev/null | awk '{print $2}' | cut -d'.' -f1-2)
+			rust_version=$(_purity_timeout 2 rustc --version 2>/dev/null | awk '{print $2}' | cut -d'.' -f1-2)
 		fi
 		[[ -n "$rust_version" ]] && result+="rust:${rust_version} "
 	fi
 	
 	# Java version - shorter timeout for better responsiveness
-	if [[ "${PURITY_SHOW_JAVA:-1}" != "0" ]] && ([[ -f pom.xml ]] || [[ -f build.gradle ]] || [[ -f build.gradle.kts ]]) && command -v java &>/dev/null; then
+	if [[ "${PURITY_SHOW_JAVA:-1}" != "0" ]] && _purity_upsearch pom.xml build.gradle build.gradle.kts && command -v java &>/dev/null; then
 		local java_version
-		java_version=$(timeout 2 java -version 2>&1 | head -n1 | awk -F '"' '{print $2}' | cut -d'.' -f1)
+		java_version=$(_purity_timeout 2 java -version 2>&1 | head -n1 | awk -F '"' '{print $2}' | cut -d'.' -f1)
 		[[ -n "$java_version" ]] && result+="java:${java_version} "
 	fi
 	
 	# PHP version - shorter timeout for better responsiveness
-	if [[ "${PURITY_SHOW_PHP:-1}" != "0" ]] && [[ -f composer.json ]] && command -v php &>/dev/null; then
+	if [[ "${PURITY_SHOW_PHP:-1}" != "0" ]] && _purity_upsearch composer.json .php-version && command -v php &>/dev/null; then
 		local php_version
-		php_version=$(timeout 2 php --version 2>/dev/null | head -n1 | awk '{print $2}' | cut -d'-' -f1 | cut -d'.' -f1-2)
+		php_version=$(_purity_timeout 2 php --version 2>/dev/null | head -n1 | awk '{print $2}' | cut -d'-' -f1 | cut -d'.' -f1-2)
 		[[ -n "$php_version" ]] && result+="php:${php_version} "
 	fi
 	
@@ -1107,7 +1411,7 @@ prompt_purity_enhanced_async_language_versions() {
 	
 	# Cache result using both smart key and legacy key (even if empty to prevent repeated calls)
 	prompt_purity_enhanced_cache_set "$cache_key" "${result:-languages:none}"
-	prompt_purity_enhanced_cache_set "languages" "${result:-languages:none}"  # Legacy compatibility
+	
 	
 	[[ -n "$result" && "$result" != "languages:none" ]] && echo "$result"
 }
@@ -1115,6 +1419,8 @@ prompt_purity_enhanced_async_language_versions() {
 # Async cloud service operations - Enhanced with aggressive caching for slow operations
 prompt_purity_enhanced_async_cloud_info() {
 	local result=""
+
+	[[ "${_purity_show_cloud:-1}" == "0" ]] && return
 	
 	# Generate smart cache key including cloud environment variables
 	local cache_key="$(prompt_purity_enhanced_generate_cache_key "cloud")"
@@ -1126,30 +1432,24 @@ prompt_purity_enhanced_async_cloud_info() {
 		return
 	fi
 	
-	# Try legacy cache for backwards compatibility
-	if cached_result="$(prompt_purity_enhanced_cache_get "cloud" "${PURITY_CACHE_TTL_SLOW}" 2>/dev/null)" && [[ -n "$cached_result" ]]; then
-		echo "$cached_result"
-		# Migrate to new cache key
-		prompt_purity_enhanced_cache_set "$cache_key" "$cached_result"
-		return
-	fi
-	
 	# AWS profile (fast, from environment variable - check first)
 	if [[ "${PURITY_SHOW_AWS:-1}" != "0" ]] && [[ -n "${AWS_PROFILE:-}" ]]; then
 		result+="aws:${AWS_PROFILE} "
 	fi
 	
 	# Google Cloud project (VERY slow, aggressive timeout)
-	if [[ "${PURITY_SHOW_GCP:-1}" != "0" ]] && command -v gcloud &>/dev/null; then
+	if [[ "${PURITY_SHOW_GCP:-1}" != "0" ]] && command -v gcloud &>/dev/null && _purity_has_gcp_config; then
 		# Check if we have a cached GCP project from environment first
-		if [[ -n "${GCLOUD_PROJECT:-}" ]]; then
+		if [[ -n "${CLOUDSDK_CORE_PROJECT:-}" ]]; then
+			result+="gcp:${CLOUDSDK_CORE_PROJECT} "
+		elif [[ -n "${GCLOUD_PROJECT:-}" ]]; then
 			result+="gcp:${GCLOUD_PROJECT} "
 		else
 			local gcp_project
 			# Reduce timeout from 5s to 2s for better responsiveness
-			gcp_project=$(timeout 2 gcloud config get-value project 2>/dev/null)
+			gcp_project=$(_purity_timeout 2 gcloud config get-value project 2>/dev/null)
 			local gcloud_exit=$?
-			if [[ $gcloud_exit -eq 124 ]]; then
+			if _purity_is_timeout_exit "$gcloud_exit"; then
 				# Timeout - cache this state to avoid repeated slow calls
 				prompt_purity_enhanced_cache_set "gcp-timeout-${cache_key}" "timeout" 30
 			elif [[ -n "$gcp_project" && "$gcp_project" != "(unset)" ]]; then
@@ -1159,15 +1459,15 @@ prompt_purity_enhanced_async_cloud_info() {
 	fi
 	
 	# Azure subscription (EXTREMELY slow, very aggressive timeout)
-	if [[ "${PURITY_SHOW_AZURE:-1}" != "0" ]] && command -v az &>/dev/null; then
+	if [[ "${PURITY_SHOW_AZURE:-1}" != "0" ]] && command -v az &>/dev/null && _purity_has_azure_config; then
 		# Check for cached timeout state first
 		local azure_timeout_key="azure-timeout-${cache_key}"
 		if ! prompt_purity_enhanced_cache_get "$azure_timeout_key" 30 &>/dev/null; then
 			local azure_sub
 			# Reduce timeout from 5s to 2s for better responsiveness
-			azure_sub=$(timeout 2 az account show --query name -o tsv 2>/dev/null)
+			azure_sub=$(_purity_timeout 2 az account show --query name -o tsv 2>/dev/null)
 			local az_exit=$?
-			if [[ $az_exit -eq 124 ]]; then
+			if _purity_is_timeout_exit "$az_exit"; then
 				# Timeout - cache this state to avoid repeated slow calls
 				prompt_purity_enhanced_cache_set "$azure_timeout_key" "timeout" 30
 			elif [[ -n "$azure_sub" ]]; then
@@ -1184,7 +1484,7 @@ prompt_purity_enhanced_async_cloud_info() {
 	
 	# Cache result using both smart key and legacy key (even if empty to prevent repeated calls)
 	prompt_purity_enhanced_cache_set "$cache_key" "${result:-cloud:none}"
-	prompt_purity_enhanced_cache_set "cloud" "${result:-cloud:none}"  # Legacy compatibility
+	
 	
 	[[ -n "$result" && "$result" != "cloud:none" ]] && echo "$result"
 }
@@ -1192,6 +1492,8 @@ prompt_purity_enhanced_async_cloud_info() {
 # Async infrastructure tools operations - Enhanced with file-based hints and caching
 prompt_purity_enhanced_async_infra_info() {
 	local result=""
+
+	[[ "${_purity_show_cloud:-1}" == "0" ]] && return
 	
 	# Generate smart cache key per project directory
 	local cache_key="$(prompt_purity_enhanced_generate_cache_key "infra")"
@@ -1203,14 +1505,6 @@ prompt_purity_enhanced_async_infra_info() {
 		return
 	fi
 	
-	# Try legacy cache for backwards compatibility
-	if cached_result="$(prompt_purity_enhanced_cache_get "infra" "${PURITY_CACHE_TTL_SLOW}" 2>/dev/null)" && [[ -n "$cached_result" ]]; then
-		echo "$cached_result"
-		# Migrate to new cache key
-		prompt_purity_enhanced_cache_set "$cache_key" "$cached_result"
-		return
-	fi
-	
 	# Terraform workspace - check file hints first
 	if [[ "${PURITY_SHOW_TERRAFORM:-1}" != "0" ]] && [[ -f *.tf(#qN) ]] && command -v terraform &>/dev/null; then
 		local tf_workspace
@@ -1219,7 +1513,7 @@ prompt_purity_enhanced_async_infra_info() {
 			tf_workspace="$(cat .terraform/environment 2>/dev/null)"
 		else
 			# Fallback to terraform command with shorter timeout
-			tf_workspace=$(timeout 2 terraform workspace show 2>/dev/null)
+			tf_workspace=$(_purity_timeout 2 terraform workspace show 2>/dev/null)
 		fi
 		[[ -n "$tf_workspace" && "$tf_workspace" != "default" ]] && result+="terraform:${tf_workspace} "
 	fi
@@ -1240,7 +1534,7 @@ prompt_purity_enhanced_async_infra_info() {
 		done
 		if [[ -z "$pulumi_stack" ]]; then
 			# Fallback to pulumi command with shorter timeout
-			pulumi_stack=$(timeout 2 pulumi stack --show-name 2>/dev/null)
+			pulumi_stack=$(_purity_timeout 2 pulumi stack --show-name 2>/dev/null)
 		fi
 		[[ -n "$pulumi_stack" ]] && result+="pulumi:${pulumi_stack} "
 	fi
@@ -1250,7 +1544,7 @@ prompt_purity_enhanced_async_infra_info() {
 	
 	# Cache result using both smart key and legacy key (even if empty to prevent repeated calls)
 	prompt_purity_enhanced_cache_set "$cache_key" "${result:-infra:none}"
-	prompt_purity_enhanced_cache_set "infra" "${result:-infra:none}"  # Legacy compatibility
+	
 	
 	[[ -n "$result" && "$result" != "infra:none" ]] && echo "$result"
 }
@@ -1294,6 +1588,12 @@ prompt_purity_enhanced_async_callback() {
 					info[$key]=$value
 				done
 
+				# Reject stale results from a previous directory
+				[[ -n "${info[pwd]}" && "${info[pwd]}" != "$PWD" ]] && return
+
+				# Store git toplevel for Pure's prefix-check in async_tasks
+				[[ -n "${info[top]}" ]] && prompt_purity_enhanced_vcs_info[pwd]="${info[top]}"
+
 				if [[ ${prompt_purity_enhanced_vcs_info[branch]} != ${info[branch]} ]] || \
 				   [[ ${prompt_purity_enhanced_vcs_info[action]} != ${info[action]} ]] || \
 				   [[ ${prompt_purity_enhanced_vcs_info[status]} != ${info[status]} ]] || \
@@ -1331,8 +1631,12 @@ prompt_purity_enhanced_async_callback() {
 					next_context[$key]=$value
 				done
 
+				# Reject stale results from a previous directory
+				[[ -n "${next_context[pwd]}" && "${next_context[pwd]}" != "$PWD" ]] && return
+
 				local context_key
-				for context_key in docker k8s languages cloud infra; do
+				# Languages remain SYNC (in precmd). Async owns: docker, k8s, cloud, infra.
+				for context_key in docker k8s cloud infra; do
 					if [[ ${prompt_purity_enhanced_context_info[$context_key]} != ${next_context[$context_key]} ]]; then
 						if [[ -n ${next_context[$context_key]} ]]; then
 							prompt_purity_enhanced_context_info[$context_key]=${next_context[$context_key]}
@@ -1343,8 +1647,9 @@ prompt_purity_enhanced_async_callback() {
 					fi
 				done
 			else
+				# On error, clear only async-managed contexts (not sync-managed languages)
 				local context_key
-				for context_key in docker k8s languages cloud infra; do
+				for context_key in docker k8s cloud infra; do
 					if [[ -n ${prompt_purity_enhanced_context_info[$context_key]} ]]; then
 						unset "prompt_purity_enhanced_context_info[$context_key]"
 						do_render=1
@@ -1352,7 +1657,7 @@ prompt_purity_enhanced_async_callback() {
 				done
 			fi
 			if (( do_render || ${prompt_purity_enhanced_async_render_requested:-0} )); then
-				typeset -g prompt_purity_enhanced_context="$(prompt_purity_enhanced_build_context_line)"
+				prompt_purity_enhanced_build_context_line
 				prompt_purity_enhanced_render
 			fi
 			return
@@ -1394,11 +1699,6 @@ prompt_purity_enhanced_render() {
 	unset prompt_purity_enhanced_async_render_requested
 }
 
-# Compatibility shim; rendering is centralized in prompt_purity_enhanced_render
-prompt_purity_enhanced_render_preprompt() {
-	prompt_purity_enhanced_render
-}
-
 # Immediate async refresh (like Pure's prompt_pure_async_refresh)
 
 # ================================================================================================
@@ -1407,91 +1707,82 @@ prompt_purity_enhanced_render_preprompt() {
 
 # Build context line from async state and cached data
 prompt_purity_enhanced_build_context_line() {
-	local context_line=""
+	local -a context_items
 	
 	# Show virtualenv if activated (synchronous, fast)
 	if [[ "${PURITY_SHOW_PYTHON:-1}" != "0" ]] && [[ -n $VIRTUAL_ENV ]]; then
 		local venv_color=$(prompt_purity_enhanced_get_color virtualenv 242)
-		context_line+="%F{$venv_color}(${VIRTUAL_ENV:t})%f "
+		context_items+=("%F{$venv_color}(${VIRTUAL_ENV:t})%f")
 	fi
 	
 	# Add background jobs to context indicators (moved to be early in context)
 	if (( ${#jobstates} )); then
 		local suspended_jobs_color=$(prompt_purity_enhanced_get_color suspended_jobs red)
-		context_line+="%F{$suspended_jobs_color}[✦${#jobstates}]%f "
+		context_items+=("%F{$suspended_jobs_color}[✦${#jobstates}]%f")
 	fi
 	
 	# Parse and display Docker info from async state
-	if [[ -n ${prompt_purity_enhanced_context_info[docker]} ]]; then
+	if [[ "${_purity_show_docker:-1}" != "0" ]] && [[ "${PURITY_SHOW_DOCKER:-1}" != "0" ]] && [[ -n ${prompt_purity_enhanced_context_info[docker]} ]]; then
 		local docker_info="${prompt_purity_enhanced_context_info[docker]}"
-		if [[ $docker_info =~ "docker:running=([0-9]+)( stopped=([0-9]+))?" ]]; then
+		if [[ $docker_info =~ "docker:running=([0-9]+) total=([0-9]+)" ]]; then
 			local running_count="${match[1]}"
-			local stopped_count="${match[3]:-0}"
-			local docker_color=$(prompt_purity_enhanced_get_color docker 64)
-			
-			if [[ $stopped_count -gt 0 ]]; then
-				context_line+="%F{$docker_color}🐳${running_count}/%F{242}${stopped_count}%f "
-			else
-				context_line+="%F{$docker_color}🐳${running_count}%f "
-			fi
+			local total_count="${match[2]}"
+			local docker_color=$(prompt_purity_enhanced_get_color docker 39)
+			context_items+=("%F{$docker_color}🐳 ${running_count}/${total_count}%f")
 		fi
 	fi
 	
 	# Parse and display Kubernetes info from async state
-	if [[ -n ${prompt_purity_enhanced_context_info[k8s]} ]]; then
+	if [[ "${_purity_show_cloud:-1}" != "0" ]] && [[ "${PURITY_SHOW_KUBERNETES:-1}" != "0" ]] && [[ -n ${prompt_purity_enhanced_context_info[k8s]} ]]; then
 		local k8s_info="${prompt_purity_enhanced_context_info[k8s]}"
 		if [[ $k8s_info =~ "k8s:context=(.+)" ]]; then
 			local kube_context="${match[1]}"
 			local kube_color=$(prompt_purity_enhanced_get_color kubernetes 45)
-			context_line+="%F{$kube_color}☸ ${kube_context}%f "
+			context_items+=("%F{$kube_color}☸ ${kube_context}%f")
 		fi
 	fi
 	
-	# Parse and display language versions from async state
-	if [[ -n ${prompt_purity_enhanced_context_info[languages]} ]]; then
-		local languages_info="${prompt_purity_enhanced_context_info[languages]}"
+	# Display language versions from SYNC detection (immediate, no delay)
+	if [[ -n "${_purity_sync_languages}" ]]; then
 		local -A lang_versions
-		
-		# Parse language info (format: "node:18 ruby:3.2 python:3.9")
-		for item in ${(z)languages_info}; do
+		for item in ${(z)_purity_sync_languages}; do
 			if [[ $item =~ "([^:]+):(.+)" ]]; then
 				lang_versions[${match[1]}]="${match[2]}"
 			fi
 		done
-		
-		# Display each language with appropriate color and icon
+
 		[[ -n ${lang_versions[node]} ]] && {
 			local node_color=$(prompt_purity_enhanced_get_color node 70)
-			context_line+="%F{$node_color}⬢ ${lang_versions[node]}%f "
+			context_items+=("%F{$node_color}⬢ ${lang_versions[node]}%f")
 		}
 		[[ -n ${lang_versions[ruby]} ]] && {
 			local ruby_color=$(prompt_purity_enhanced_get_color ruby 196)
-			context_line+="%F{$ruby_color}💎 ${lang_versions[ruby]}%f "
+			context_items+=("%F{$ruby_color}💎 ${lang_versions[ruby]}%f")
 		}
 		[[ -n ${lang_versions[python]} ]] && {
 			local python_color=$(prompt_purity_enhanced_get_color python 226)
-			context_line+="%F{$python_color}🐍 ${lang_versions[python]}%f "
+			context_items+=("%F{$python_color}🐍 ${lang_versions[python]}%f")
 		}
 		[[ -n ${lang_versions[go]} ]] && {
 			local go_color=$(prompt_purity_enhanced_get_color go 81)
-			context_line+="%F{$go_color}🐹 ${lang_versions[go]}%f "
+			context_items+=("%F{$go_color}🐹 ${lang_versions[go]}%f")
 		}
 		[[ -n ${lang_versions[rust]} ]] && {
 			local rust_color=$(prompt_purity_enhanced_get_color rust 208)
-			context_line+="%F{$rust_color}🦀 ${lang_versions[rust]}%f "
+			context_items+=("%F{$rust_color}🦀 ${lang_versions[rust]}%f")
 		}
 		[[ -n ${lang_versions[java]} ]] && {
 			local java_color=$(prompt_purity_enhanced_get_color java 214)
-			context_line+="%F{$java_color}☕ ${lang_versions[java]}%f "
+			context_items+=("%F{$java_color}☕ ${lang_versions[java]}%f")
 		}
 		[[ -n ${lang_versions[php]} ]] && {
-			local php_color=$(prompt_purity_enhanced_get_color php 99)
-			context_line+="%F{$php_color}🐘 ${lang_versions[php]}%f "
+			local php_color=$(prompt_purity_enhanced_get_color php 111)
+			context_items+=("%F{$php_color}🐘 ${lang_versions[php]}%f")
 		}
 	fi
 	
 	# Parse and display cloud info from async state
-	if [[ -n ${prompt_purity_enhanced_context_info[cloud]} ]]; then
+	if [[ "${_purity_show_cloud:-1}" != "0" ]] && [[ -n ${prompt_purity_enhanced_context_info[cloud]} ]]; then
 		local cloud_info="${prompt_purity_enhanced_context_info[cloud]}"
 		local -A cloud_services
 		
@@ -1503,22 +1794,22 @@ prompt_purity_enhanced_build_context_line() {
 		done
 		
 		# Display each cloud service
-		[[ -n ${cloud_services[aws]} ]] && {
+		[[ "${PURITY_SHOW_AWS:-1}" != "0" ]] && [[ -n ${cloud_services[aws]} ]] && {
 			local aws_color=$(prompt_purity_enhanced_get_color aws 208)
-			context_line+="%F{$aws_color}☁ ${cloud_services[aws]}%f "
+			context_items+=("%F{$aws_color}☁ ${cloud_services[aws]}%f")
 		}
-		[[ -n ${cloud_services[gcp]} ]] && {
+		[[ "${PURITY_SHOW_GCP:-1}" != "0" ]] && [[ -n ${cloud_services[gcp]} ]] && {
 			local gcp_color=$(prompt_purity_enhanced_get_color gcp 33)
-			context_line+="%F{$gcp_color}☁️ ${cloud_services[gcp]}%f "
+			context_items+=("%F{$gcp_color}☁️ ${cloud_services[gcp]}%f")
 		}
-		[[ -n ${cloud_services[azure]} ]] && {
+		[[ "${PURITY_SHOW_AZURE:-1}" != "0" ]] && [[ -n ${cloud_services[azure]} ]] && {
 			local azure_color=$(prompt_purity_enhanced_get_color azure 39)
-			context_line+="%F{$azure_color}🌐 ${cloud_services[azure]}%f "
+			context_items+=("%F{$azure_color}🌐 ${cloud_services[azure]}%f")
 		}
 	fi
 	
 	# Parse and display infrastructure info from async state
-	if [[ -n ${prompt_purity_enhanced_context_info[infra]} ]]; then
+	if [[ "${_purity_show_cloud:-1}" != "0" ]] && [[ -n ${prompt_purity_enhanced_context_info[infra]} ]]; then
 		local infra_info="${prompt_purity_enhanced_context_info[infra]}"
 		local -A infra_tools
 		
@@ -1530,38 +1821,18 @@ prompt_purity_enhanced_build_context_line() {
 		done
 		
 		# Display each infrastructure tool
-		[[ -n ${infra_tools[terraform]} ]] && {
+		[[ "${PURITY_SHOW_TERRAFORM:-1}" != "0" ]] && [[ -n ${infra_tools[terraform]} ]] && {
 			local terraform_color=$(prompt_purity_enhanced_get_color terraform 214)
-			context_line+="%F{$terraform_color}🏗️ ${infra_tools[terraform]}%f "
+			context_items+=("%F{$terraform_color}🏗️ ${infra_tools[terraform]}%f")
 		}
-		[[ -n ${infra_tools[pulumi]} ]] && {
+		[[ "${PURITY_SHOW_PULUMI:-1}" != "0" ]] && [[ -n ${infra_tools[pulumi]} ]] && {
 			local pulumi_color=$(prompt_purity_enhanced_get_color pulumi 165)
-			context_line+="%F{$pulumi_color}📦 ${infra_tools[pulumi]}%f "
+			context_items+=("%F{$pulumi_color}📦 ${infra_tools[pulumi]}%f")
 		}
 	fi
 	
-	# Store and return the built context line
-	typeset -g prompt_purity_enhanced_context="$context_line"
-	echo "$context_line"
-}
-
-# Load cached context data into async state on startup
-prompt_purity_enhanced_load_cached_context() {
-	# Load cached context for immediate display
-	local cached_docker cached_k8s cached_languages cached_cloud cached_infra
-	
-	cached_docker=$(prompt_purity_enhanced_get_cached_context "docker" 2>/dev/null)
-	cached_k8s=$(prompt_purity_enhanced_get_cached_context "k8s" 2>/dev/null)
-	cached_languages=$(prompt_purity_enhanced_get_cached_context "languages" 2>/dev/null)
-	cached_cloud=$(prompt_purity_enhanced_get_cached_context "cloud" 2>/dev/null)
-	cached_infra=$(prompt_purity_enhanced_get_cached_context "infra" 2>/dev/null)
-	
-	# Update context state with cached data
-	[[ -n $cached_docker ]] && prompt_purity_enhanced_context_info[docker]="$cached_docker"
-	[[ -n $cached_k8s ]] && prompt_purity_enhanced_context_info[k8s]="$cached_k8s"
-	[[ -n $cached_languages ]] && prompt_purity_enhanced_context_info[languages]="$cached_languages"
-	[[ -n $cached_cloud ]] && prompt_purity_enhanced_context_info[cloud]="$cached_cloud"
-	[[ -n $cached_infra ]] && prompt_purity_enhanced_context_info[infra]="$cached_infra"
+	# Store the built context line (no echo — this is called during async callback)
+	typeset -g prompt_purity_enhanced_context="${(j: :)context_items}"
 }
 
 # ================================================================================================
@@ -1578,26 +1849,7 @@ prompt_purity_enhanced_should_invalidate_cache() {
 	local legacy_cache_file="$PURITY_CACHE_DIR/${context_type}.cache"
 	
 	case $context_type in
-		docker)
-			# Invalidate if docker-compose files changed
-			local compose_files=("docker-compose.yml" "docker-compose.yaml" "compose.yml" "compose.yaml" 
-			                     "docker-compose.override.yml" "docker-compose.override.yaml" 
-			                     "compose.override.yml" "compose.override.yaml")
-			for file in $compose_files; do
-				[[ -f "$file" ]] && {
-					prompt_purity_enhanced_file_changed "$file" "$cache_file" && return 0
-					prompt_purity_enhanced_file_changed "$file" "$legacy_cache_file" && return 0
-				}
-			done
-			# Also check .env files that affect compose
-			local env_files=(".env" ".env.local" ".env.production" ".env.development")
-			for file in $env_files; do
-				[[ -f "$file" ]] && {
-					prompt_purity_enhanced_file_changed "$file" "$cache_file" && return 0
-					prompt_purity_enhanced_file_changed "$file" "$legacy_cache_file" && return 0
-				}
-			done
-			;;
+
 		k8s)
 			# Invalidate if kubeconfig changed
 			local kubeconfig="${KUBECONFIG:-$HOME/.kube/config}"
@@ -1744,8 +1996,7 @@ prompt_purity_enhanced_trigger_async_updates() {
 		return
 	fi
 
-	async_worker_eval "prompt_purity_enhanced" builtin cd -q "$PWD" 2>/dev/null || true
-	async_job "prompt_purity_enhanced" prompt_purity_enhanced_async_context 2>/dev/null || true
+	async_job "prompt_purity_enhanced" prompt_purity_enhanced_async_context "$PWD" 2>/dev/null || true
 	
 	# Always return success - async job failures shouldn't fail the trigger
 	return 0
@@ -1800,10 +2051,15 @@ prompt_purity_enhanced_precmd() {
 		( prompt_purity_enhanced_cache_cleanup 2>/dev/null || true ) &!
 	}
 	
+	# Sync language detection (immediate, no async delay — like p10k/Starship).
+	# Docker is async (gated on Compose presence in async_docker_status) to keep
+	# the prompt non-blocking when the docker daemon is slow or wedged.
+	prompt_purity_enhanced_sync_languages
+
 	# Initialize async and queue tasks, with sync fallback
 	if prompt_purity_enhanced_async_init; then
 		prompt_purity_enhanced_async_tasks
-		# Build context from current async data + sync-only data (virtualenv, jobs)
+		# Build context from sync languages + async docker/k8s/cloud/infra data
 		prompt_purity_enhanced_build_context_line
 	else
 		# Fallback to synchronous context when async unavailable
@@ -1881,22 +2137,31 @@ prompt_purity_enhanced_git_action() {
 # Async-aware git functions that fallback to sync if async isn't available
 # Ccstatusline-inspired git info display: 𖠰 worktree | ⎇ branch | (+42,-10)
 prompt_purity_enhanced_worktree_segment() {
-	# Only show worktree role/action if we're in a git repository
-	command git rev-parse --is-inside-work-tree &>/dev/null || return 0
-
-	# Minimal preset hides this segment entirely
-	[[ "${_purity_show_worktree_role:-1}" == "0" ]] && return 0
-
-	# Refresh structured repo-role globals from detection logic
+	# Refresh structured repo-role globals first (needed for bare detection)
 	prompt_purity_enhanced_detect_repo_role
+
+	# Bare repos are not inside a work-tree — handle before the work-tree guard
+	if [[ "${_purity_repo_role}" == "bare" ]]; then
+		[[ "${_purity_show_worktree_role:-1}" == "0" ]] && return 0
+		echo -n " %F{242}bare%f"
+		return
+	fi
+
+	# Only show worktree role/action if we're in a git repository work-tree
+	command git rev-parse --is-inside-work-tree &>/dev/null || return 0
 
 	local segment=""
 	local action="${prompt_purity_enhanced_vcs_info[action]}"
 
-	if [[ "$_purity_repo_role" == "worktree" ]] && [[ "$_purity_show_worktree_name" == "1" ]] && [[ -n "$_purity_worktree_name" ]]; then
+	if [[ "$_purity_repo_role" == "worktree" ]]; then
 		local worktree_color
 		worktree_color=$(prompt_purity_enhanced_get_color git:worktree 242)
-		segment=" %F{$worktree_color}𖠰 ${_purity_worktree_name}%f"
+		if [[ "$_purity_show_worktree_name" == "1" ]] && [[ -n "$_purity_worktree_name" ]]; then
+			segment="%F{$worktree_color}𖠰 ${_purity_worktree_name}%f"
+		else
+			# Show symbol alone when name is de-duplicated (already visible in path)
+			segment="%F{$worktree_color}𖠰%f"
+		fi
 	fi
 
 	if [[ -n "$action" ]]; then
@@ -1905,7 +2170,7 @@ prompt_purity_enhanced_worktree_segment() {
 		if [[ -n "$segment" ]]; then
 			segment+=" | %F{$action_color}${action}%f"
 		else
-			segment=" | %F{$action_color}${action}%f"
+			segment="| %F{$action_color}${action}%f"
 		fi
 	fi
 
@@ -1947,11 +2212,11 @@ prompt_purity_git_status() {
 				[[ $modified -gt 0 ]] && legacy_output="${modified}M "
 				[[ $added -gt 0 ]] && legacy_output="$legacy_output%F{green}+${added}%f "
 				[[ $deleted -gt 0 ]] && legacy_output="$legacy_output%F{red}-${deleted}%f"
-				echo " | ${legacy_output% }"
+				echo "${legacy_output% }"
 			fi
 		else
 			if (( lines_added > 0 || lines_deleted > 0 )); then
-				echo " | (%F{green}+$lines_added%f,%F{red}-$lines_deleted%f)"
+				echo "(%F{green}+$lines_added%f,%F{red}-$lines_deleted%f)"
 			fi
 		fi
 		return
@@ -1964,7 +2229,7 @@ prompt_purity_git_status() {
 
 	case "$git_style" in
 		dirty)
-			(( has_dirty > 0 )) && echo " | *"
+			(( has_dirty > 0 )) && echo "*"
 			;;
 		compact)
 			local compact_output=""
@@ -1972,7 +2237,7 @@ prompt_purity_git_status() {
 			[[ $added -gt 0 ]] && compact_output="$compact_output%F{green}+${added}%f "
 			[[ $deleted -gt 0 ]] && compact_output="$compact_output%F{red}-${deleted}%f "
 			[[ $conflicted -gt 0 ]] && compact_output="$compact_output%F{red}!${conflicted}%f "
-			[[ -n "$compact_output" ]] && echo " | ${compact_output% }"
+			[[ -n "$compact_output" ]] && echo "${compact_output% }"
 			;;
 		full|*)
 			local full_output=""
@@ -1982,13 +2247,13 @@ prompt_purity_git_status() {
 			[[ $conflicted -gt 0 ]] && full_output="$full_output%F{red}!${conflicted}%f "
 
 			if [[ -n "$full_output" ]]; then
-				local rendered=" | [${full_output% }]"
+				local rendered="[${full_output% }]"
 				if [[ "${PURITY_GIT_SHOW_LINE_COUNTS:-0}" == "1" ]] && (( lines_added > 0 || lines_deleted > 0 )); then
 					rendered="$rendered (%F{green}+$lines_added%f,%F{red}-$lines_deleted%f)"
 				fi
 				echo "$rendered"
 			elif [[ "${PURITY_GIT_SHOW_LINE_COUNTS:-0}" == "1" ]] && (( lines_added > 0 || lines_deleted > 0 )); then
-				echo " | [(%F{green}+$lines_added%f,%F{red}-$lines_deleted%f)]"
+				echo "[(%F{green}+$lines_added%f,%F{red}-$lines_deleted%f)]"
 			fi
 			;;
 	esac
@@ -2038,56 +2303,88 @@ prompt_purity_enhanced_load_preset() {
 			typeset -g _purity_git_style="compact"
 			typeset -g _purity_show_docker=1
 			typeset -g _purity_show_runtimes=1
-			typeset -g _purity_show_cloud=1
+			typeset -g _purity_show_cloud=0
 			;;
 	esac
-	
-	# Apply explicit PURITY_SHOW_* overrides (these take precedence over preset defaults)
-	# Note: We check if the variable was explicitly set by comparing with the default value
-	# Users can override preset defaults by setting PURITY_SHOW_DOCKER=0, etc.
-	# The : ${VAR:=default} syntax means the variable keeps its explicit value if already set
+	# Re-apply explicit PURITY_SHOW_* overrides — only for vars the USER explicitly set
+	# (detected via snapshot taken before :=1 defaults ran, stored in _purity_user_set_show)
+	[[ -n "${_purity_user_set_show[docker]}"     ]] && _purity_show_docker="${PURITY_SHOW_DOCKER}"
+	[[ -n "${_purity_user_set_show[kubernetes]}" ]] && _purity_show_cloud="${PURITY_SHOW_KUBERNETES}"
+	# For runtime group: enable only if at least one member was explicitly set to 1
+	if [[ "${PURITY_SHOW_NODE:-0}" == "1" && -n "${_purity_user_set_show[node]}" ]] || \
+	   [[ "${PURITY_SHOW_RUBY:-0}" == "1" && -n "${_purity_user_set_show[ruby]}" ]] || \
+	   [[ "${PURITY_SHOW_PYTHON_VERSION:-0}" == "1" && -n "${_purity_user_set_show[python_version]}" ]] || \
+	   [[ "${PURITY_SHOW_GO:-0}" == "1" && -n "${_purity_user_set_show[go]}" ]] || \
+	   [[ "${PURITY_SHOW_RUST:-0}" == "1" && -n "${_purity_user_set_show[rust]}" ]] || \
+	   [[ "${PURITY_SHOW_JAVA:-0}" == "1" && -n "${_purity_user_set_show[java]}" ]] || \
+	   [[ "${PURITY_SHOW_PHP:-0}" == "1" && -n "${_purity_user_set_show[php]}" ]]; then
+		_purity_show_runtimes=1
+	fi
+	# For cloud group: enable only if at least one member was explicitly set to 1
+	if [[ "${PURITY_SHOW_AWS:-0}" == "1" && -n "${_purity_user_set_show[aws]}" ]] || \
+	   [[ "${PURITY_SHOW_GCP:-0}" == "1" && -n "${_purity_user_set_show[gcp]}" ]] || \
+	   [[ "${PURITY_SHOW_AZURE:-0}" == "1" && -n "${_purity_user_set_show[azure]}" ]] || \
+	   [[ "${PURITY_SHOW_TERRAFORM:-0}" == "1" && -n "${_purity_user_set_show[terraform]}" ]] || \
+	   [[ "${PURITY_SHOW_PULUMI:-0}" == "1" && -n "${_purity_user_set_show[pulumi]}" ]]; then
+		_purity_show_cloud=1
+	fi
 }
 
 # ================================================================================================
 # ASYNC TASK MANAGEMENT (Following Pure's Pattern)
 # ================================================================================================
 
-# Queue essential async jobs (following Pure's always-queue approach)
+# Queue essential async jobs (Pure's pattern: detect tree change, flush if needed)
 prompt_purity_enhanced_async_tasks() {
-	# Sync worker directory with current shell (Pure's approach)
-	async_worker_eval "prompt_purity_enhanced" builtin cd -q "$PWD" 2>/dev/null || true
 	typeset -g _purity_async_pwd="$PWD"
-	
-	# Queue essential git jobs if in git repository
-	if command git rev-parse --is-inside-work-tree &>/dev/null; then
-		async_job "prompt_purity_enhanced" prompt_purity_enhanced_async_git 2>/dev/null || true
+
+	# Pure's prefix check: did we leave the previous git tree?
+	# If PWD is still under the cached path, we're in the same tree — keep state.
+	# If not, we changed projects — flush jobs and clear stale state.
+	if [[ -n "${prompt_purity_enhanced_vcs_info[pwd]}" ]] && \
+	   [[ "$PWD" != "${prompt_purity_enhanced_vcs_info[pwd]}"* ]]; then
+		# Left the previous git tree — clear everything
+		async_flush_jobs "prompt_purity_enhanced" 2>/dev/null || true
+		prompt_purity_enhanced_vcs_info=()
+		prompt_purity_enhanced_context_info=()
+		typeset -g prompt_purity_enhanced_context=""
 	fi
 
-	async_job "prompt_purity_enhanced" prompt_purity_enhanced_async_context 2>/dev/null || true
+	# Sync worker directory
+	async_worker_eval "prompt_purity_enhanced" builtin cd -q "$PWD" 2>/dev/null || true
+
+	# Queue git job if in git repository
+	if command git rev-parse --is-inside-work-tree &>/dev/null; then
+		async_job "prompt_purity_enhanced" prompt_purity_enhanced_async_git "$PWD" 2>/dev/null || true
+	fi
+
+	# Always queue context job (Docker, languages, cloud, etc.)
+	async_job "prompt_purity_enhanced" prompt_purity_enhanced_async_context "$PWD" 2>/dev/null || true
 }
 
 # Immediate git branch display (sync, like Pure)
 prompt_purity_enhanced_git_branch_sync() {
 	command git rev-parse --is-inside-work-tree &>/dev/null || return 0
+	local branch_color
+	branch_color=$(prompt_purity_enhanced_get_color git:branch yellow)
 	local branch
 	branch=$(command git branch --show-current 2>/dev/null) || return
-	[[ -n "$branch" ]] && echo " %F{yellow}⎇ $branch%f"
+	# Shorten long branch names: keep prefix…suffix
+	if (( ${#branch} > 30 )); then
+		branch="${branch[1,20]}…${branch[-7,-1]}"
+	fi
+	[[ -n "$branch" ]] && echo "%F{$branch_color}⎇ $branch%f"
 }
 
 # ================================================================================================
-# DIRECTORY CHANGE HANDLER
+# DIRECTORY CHANGE HANDLER (Pure pattern: no-op chpwd, handle in precmd)
 # ================================================================================================
 
-# Clear stale git state on directory change to avoid showing data from previous repo
+# chpwd is intentionally a no-op. Pure has no chpwd hook.
+# All directory-change logic lives in prompt_purity_enhanced_async_tasks
+# which runs from precmd and uses a prefix check to detect tree changes.
 prompt_purity_enhanced_chpwd() {
-	if prompt_purity_enhanced_async_available; then
-		# Cancel in-flight jobs to avoid stale async updates
-		async_flush_jobs "prompt_purity_enhanced" 2>/dev/null || true
-	fi
-
-	# Clear git info immediately so the prompt doesn't flash stale data
-	prompt_purity_enhanced_vcs_info=()
-	unset prompt_purity_enhanced_async_render_requested
+	return 0
 }
 
 # ================================================================================================
@@ -2184,8 +2481,6 @@ prompt_purity_enhanced_setup() {
 	local path_color=$(prompt_purity_enhanced_get_color path blue)
 	git_branch_color=$(prompt_purity_enhanced_get_color git:branch yellow)
 	local git_action_color=$(prompt_purity_enhanced_get_color git:action yellow)
-	local git_ahead_color=$(prompt_purity_enhanced_get_color git:ahead green)
-	local git_behind_color=$(prompt_purity_enhanced_get_color git:behind red)
 	local git_worktree_color=$(prompt_purity_enhanced_get_color git:worktree green)
 	local prompt_success_color=$(prompt_purity_enhanced_get_color prompt:success green)
 	local prompt_error_color=$(prompt_purity_enhanced_get_color prompt:error red)
@@ -2211,8 +2506,8 @@ prompt_purity_enhanced_setup() {
 		prompt_purity_enhanced_username="%F{$user_host_color}%n@%m%f "
 	fi
 
-	# Ccstatusline-inspired clean prompt: path [context] ⎇ branch 𖠰 worktree | action | counts ❯
-	PROMPT="${prompt_purity_enhanced_username}%F{$path_color}%~%f \${prompt_purity_enhanced_context}\$(prompt_purity_enhanced_git_branch_sync)\$(prompt_purity_git_info)\$(prompt_purity_git_status) %(?.%F{$prompt_success_color}.%F{$prompt_error_color})❯%f "
+	# Ccstatusline-inspired clean prompt: path [context] [git] ❯
+	PROMPT="${prompt_purity_enhanced_username}%F{$path_color}%~%f\$(prompt_purity_enhanced_optional_context)\$(prompt_purity_enhanced_optional_git) %(?.%F{$prompt_success_color}.%F{$prompt_error_color})❯%f "
 	RPROMPT='%F{red}%(?..⏎)%f'
 }
 
